@@ -64,93 +64,156 @@ LEVEL_EMOJI = {"NORMAL": "✅", "MONITOR": "⚠️", "ALERT": "🚨"}
 def _css():
     st.markdown("""
 <style>
-/* global */
+/* ── global ──────────────────────────────────────────────────────────────── */
 .stApp { background-color:#0E1117; color:#E0E0E0; }
 .block-container { padding-top:1rem; }
 
-/* header banner */
+/* ── hide default Streamlit top decoration bar ───────────────────────────── */
+header[data-testid="stHeader"] { display:none !important; }
+#MainMenu { visibility:hidden; }
+footer    { visibility:hidden; }
+
+/* ── sidebar background & ALL text inside it ─────────────────────────────── */
+[data-testid="stSidebar"] {
+    background: #131722 !important;
+}
+[data-testid="stSidebar"] * {
+    color: #D0D8F0 !important;
+}
+/* sidebar headings */
+[data-testid="stSidebar"] h1,
+[data-testid="stSidebar"] h2,
+[data-testid="stSidebar"] h3,
+[data-testid="stSidebar"] h4 {
+    color: #FFFFFF !important;
+}
+/* sidebar markdown paragraphs / labels */
+[data-testid="stSidebar"] p,
+[data-testid="stSidebar"] span,
+[data-testid="stSidebar"] label {
+    color: #C8D4F0 !important;
+}
+/* slider track + thumb labels */
+[data-testid="stSidebar"] [data-testid="stSlider"] label,
+[data-testid="stSidebar"] [data-testid="stNumberInput"] label {
+    color: #90CAF9 !important;
+    font-size: 0.82rem !important;
+}
+/* selectbox label */
+[data-testid="stSidebar"] [data-testid="stSelectbox"] label {
+    color: #90CAF9 !important;
+}
+/* divider line */
+[data-testid="stSidebar"] hr { border-color: #2A3050 !important; }
+
+/* ── sidebar nav radio buttons ───────────────────────────────────────────── */
+[data-testid="stSidebar"] div[role="radiogroup"] {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+[data-testid="stSidebar"] div[role="radiogroup"] label {
+    background: #1E2538 !important;
+    border: 1px solid #3A4568 !important;
+    border-radius: 10px !important;
+    padding: 10px 16px !important;
+    color: #90CAF9 !important;
+    font-weight: 700 !important;
+    font-size: 0.95rem !important;
+    cursor: pointer !important;
+    transition: background 0.2s, border-color 0.2s !important;
+    width: 100% !important;
+}
+[data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked) {
+    background: #1565C0 !important;
+    border-color: #42A5F5 !important;
+    color: #FFFFFF !important;
+}
+[data-testid="stSidebar"] div[role="radiogroup"] label input {
+    display: none !important;
+}
+
+/* ── main content text defaults ──────────────────────────────────────────── */
+.stMarkdown, .stMarkdown p { color: #E0E0E0; }
+
+/* ── header banner ───────────────────────────────────────────────────────── */
 .ss-header {
-    background:linear-gradient(135deg,#1565C0 0%,#0D47A1 50%,#01579B 100%);
+    background: linear-gradient(135deg,#1565C0 0%,#0D47A1 50%,#01579B 100%);
     border-radius:14px; padding:22px 32px; margin-bottom:18px;
     box-shadow:0 4px 24px rgba(21,101,192,0.4);
 }
 .ss-header h1 {
-    color:white; font-size:2.6rem; letter-spacing:5px;
+    color:#FFFFFF !important; font-size:2.6rem; letter-spacing:5px;
     font-weight:900; margin:0;
 }
-.ss-header p { color:#90CAF9; font-size:1rem; margin:4px 0 0 0; }
+.ss-header p { color:#90CAF9 !important; font-size:1rem; margin:4px 0 0 0; }
 
-/* nav pills */
-.nav-pill {
-    display:inline-block; padding:7px 20px; border-radius:20px;
-    font-size:0.9rem; font-weight:600; cursor:pointer;
-    border:1px solid #2A3050; margin-right:8px;
-    transition:all 0.2s;
+/* ── section headers (sh) ────────────────────────────────────────────────── */
+.sh {
+    color: #FFFFFF !important;
+    font-size: 0.88rem;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    font-weight: 800;
+    border-left: 4px solid #42A5F5;
+    border-bottom: 1px solid #2A3050;
+    padding: 10px 0 10px 16px;
+    margin: 28px 0 16px 0;
+    background: linear-gradient(90deg, rgba(21,101,192,0.18) 0%, transparent 65%);
+    border-radius: 0 8px 8px 0;
 }
-.nav-active { background:#1565C0; color:white; border-color:#1565C0; }
-.nav-inactive { background:#1A1F2E; color:#90CAF9; }
 
-/* metric cards */
+/* ── metric cards (mc) ───────────────────────────────────────────────────── */
 .mc {
     background:#1A1F2E; border:1px solid #2A3050;
     border-radius:10px; padding:14px 18px; margin:5px 0;
 }
 .mc h4 {
-    color:#90CAF9; font-size:0.72rem; margin:0 0 5px 0;
+    color:#90CAF9 !important; font-size:0.72rem; margin:0 0 5px 0;
     text-transform:uppercase; letter-spacing:1.5px;
 }
-.mc p { font-size:1.55rem; font-weight:700; margin:0; }
+.mc p { font-size:1.55rem; font-weight:700; margin:0; color:#E0E0E0; }
 
-/* result box */
-.rbox { border-radius:12px; padding:20px 26px; margin:14px 0; }
-
-/* hardware card */
+/* ── hardware / top metric cards (hwc) ───────────────────────────────────── */
 .hwc {
     background:#0D1B2A; border:1px solid #1565C0;
     border-radius:10px; padding:12px 16px; margin:4px 0;
 }
 .hwc h4 {
-    color:#42A5F5; font-size:0.72rem; margin:0 0 4px 0;
+    color:#42A5F5 !important; font-size:0.72rem; margin:0 0 4px 0;
     text-transform:uppercase; letter-spacing:1px;
 }
-.hwc p { font-size:1.35rem; font-weight:700; margin:0; color:#E3F2FD; }
+.hwc p { font-size:1.35rem; font-weight:700; margin:0; color:#E3F2FD !important; }
 
-/* section headers */
-.sh {
-    color:#90CAF9; font-size:0.72rem; text-transform:uppercase;
-    letter-spacing:2px; border-bottom:1px solid #2A3050;
-    padding-bottom:6px; margin:22px 0 12px 0;
-}
+/* ── result box ──────────────────────────────────────────────────────────── */
+.rbox { border-radius:12px; padding:20px 26px; margin:14px 0; }
 
-/* disclaimer */
+/* ── disclaimer ──────────────────────────────────────────────────────────── */
 .disc {
     background:#1A1F2E; border-left:3px solid #FB8C00;
     padding:8px 14px; border-radius:4px;
-    color:#FFB74D; font-size:0.78rem; margin-top:10px;
+    color:#FFB74D !important; font-size:0.78rem; margin-top:10px;
 }
 
-/* factor row */
+/* ── factor rows ─────────────────────────────────────────────────────────── */
 .factor-row { padding:8px 0; border-bottom:1px solid #1e2330; }
 
-/* sidebar */
-[data-testid="stSidebar"] { background:#131722; }
-
-/* input labels */
+/* ── input labels in main area ───────────────────────────────────────────── */
 div[data-testid="stNumberInput"] label,
 div[data-testid="stSlider"]      label { color:#90CAF9 !important; }
 
-/* live badge */
+/* ── live badge ──────────────────────────────────────────────────────────── */
 .live-badge {
-    display:inline-block; background:#E53935; color:white;
+    display:inline-block; background:#E53935; color:#FFFFFF !important;
     font-size:0.7rem; font-weight:700; padding:2px 8px;
     border-radius:10px; letter-spacing:1px; margin-left:8px;
     animation:pulse 1.5s infinite;
 }
 @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.5} }
 
-/* footer */
+/* ── footer ──────────────────────────────────────────────────────────────── */
 .footer {
-    text-align:center; color:#555; font-size:0.75rem;
+    text-align:center; color:#888 !important; font-size:0.75rem;
     margin-top:30px; padding-top:12px;
     border-top:1px solid #1e2330;
 }
@@ -693,7 +756,15 @@ def page_dataset_explorer():
     # ── sidebar filters ───────────────────────────────────────────────────────
     with st.sidebar:
         st.markdown("## 🎛 Session Filters")
-        subject  = st.selectbox("Subject ID",    sorted(df["subject_id"].unique()))
+
+        # sort subjects numerically, display zero-padded
+        raw_subjects = sorted(df["subject_id"].unique(),
+                              key=lambda x: int(x) if str(x).isdigit() else x)
+        subj_labels  = [str(s).zfill(3) if str(s).isdigit() else str(s) for s in raw_subjects]
+        subj_idx     = st.selectbox("Subject ID", range(len(subj_labels)),
+                                    format_func=lambda i: subj_labels[i])
+        subject      = raw_subjects[subj_idx]
+
         sub_df   = df[df["subject_id"] == subject]
         footwear = st.selectbox("Footwear",      sorted(sub_df["footwear"].unique()))
         fw_df    = sub_df[sub_df["footwear"] == footwear]
@@ -741,9 +812,10 @@ def page_dataset_explorer():
             unsafe_allow_html=True,
         )
     with c4:
+        subj_display = str(subject).zfill(3) if str(subject).isdigit() else str(subject)
         st.markdown(
             f'<div class="mc"><h4>Session</h4>'
-            f'<p style="font-size:0.9rem">S{subject} · {footwear} · {trial}</p></div>'
+            f'<p style="font-size:0.9rem">Sub {subj_display} · {footwear} · {trial}</p></div>'
             f'<div class="mc"><h4>Mean Risk</h4>'
             f'<p style="color:{lc}">{trial_df["risk_score"].mean():.1f}</p></div>',
             unsafe_allow_html=True,
@@ -756,6 +828,7 @@ def page_dataset_explorer():
                         use_container_width=True)
 
     # ── § 2 Foot Pressure ────────────────────────────────────────────────────
+    st.divider()
     st.markdown('<div class="sh">② Foot Pressure</div>', unsafe_allow_html=True)
     ldf = trial_df[trial_df["side"] == "Left"]
     rdf = trial_df[trial_df["side"] == "Right"]
@@ -823,6 +896,7 @@ def page_dataset_explorer():
         st.plotly_chart(fig_reg, use_container_width=True)
 
     # ── § 3 Bilateral Comparison ─────────────────────────────────────────────
+    st.divider()
     st.markdown('<div class="sh">③ Left ↔ Right Comparison</div>', unsafe_allow_html=True)
     b1, b2, b3 = st.columns(3)
     with b1:
@@ -1037,23 +1111,16 @@ def page_dataset_explorer():
 def main():
     _css()
 
-    # ── top navigation ────────────────────────────────────────────────────────
-    nav_options = ["🏠 Quick Analysis", "📊 Dataset Explorer"]
-    selected    = st.radio(
-        "Navigate",
-        nav_options,
-        horizontal=True,
-        label_visibility="collapsed",
-    )
-    st.markdown("<hr style='border-color:#1e2330;margin:0 0 6px 0'>", unsafe_allow_html=True)
+    tab1, tab2 = st.tabs(["🏠  Quick Analysis", "📊  Dataset Explorer"])
 
-    if selected == "🏠 Quick Analysis":
+    with tab1:
         page_quick_analysis()
-    else:
+
+    with tab2:
         page_dataset_explorer()
 
     st.markdown(
-        '<div class="footer">SoleSense · Research Prototype · Not a medical device · '
+        '<div class="footer">SoleSense · Demo Prototype · '
         'StepUP-P150 Dataset · University of New Brunswick 2023–2024</div>',
         unsafe_allow_html=True,
     )

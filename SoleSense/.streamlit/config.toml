@@ -1,0 +1,10 @@
+[logger]
+# Suppress deprecation and info messages in the terminal
+level = "error"
+
+[browser]
+gatherUsageStats = false
+
+[server]
+headless = false
+runOnSave = true

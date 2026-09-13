@@ -140,12 +140,27 @@
 #define DEBUG_MODE   1
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  SECTION 9 — Wi-Fi  (Task 5 — configure before Wi-Fi task)
-//  NEVER commit real credentials to source control.
+//  SECTION 9 — Wi-Fi  ACCESS POINT MODE
+//
+//  The ESP32-S3 creates its OWN hotspot.
+//  Your laptop connects TO the ESP32 — no phone or router needed.
+//
+//  Step 1: Flash this firmware
+//  Step 2: On your laptop, connect to Wi-Fi network "SoleSense"
+//  Step 3: Run the Python receiver — it will always be reachable at 192.168.4.2
+//
+//  AP_SSID     : the hotspot name that appears on your laptop's Wi-Fi list
+//  AP_PASSWORD : must be 8+ characters (or "" for open, not recommended)
+//  SERVER_IP   : your laptop's IP on the AP network
+//                The ESP32 AP always assigns 192.168.4.2 to the first client.
+//                Verify with ipconfig AFTER connecting to "SoleSense" hotspot.
 // ═══════════════════════════════════════════════════════════════════════════
-#define WIFI_SSID                 "YOUR_WIFI_SSID"
-#define WIFI_PASSWORD             "YOUR_WIFI_PASSWORD"
-#define SERVER_IP                 "192.168.1.100"
+#define AP_SSID      "SoleSense"
+#define AP_PASSWORD  "solesense123"
+#define AP_CHANNEL   1
+
+// Your laptop's IP once it joins the SoleSense hotspot (almost always 192.168.4.2)
+#define SERVER_IP                 "192.168.4.2"
 #define SERVER_PORT               5005
 #define SERVER_ENDPOINT           "/api/sensor"
 #define WIFI_CONNECT_TIMEOUT_MS   15000
@@ -154,7 +169,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 //  SECTION 10 — HTTP  (Task 5)
 // ═══════════════════════════════════════════════════════════════════════════
-#define HTTP_TIMEOUT_MS  2000
+#define HTTP_TIMEOUT_MS  500
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  SECTION 11 — Pressure Disclaimer  (READ BEFORE USE)

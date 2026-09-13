@@ -151,6 +151,27 @@ class SoleSenseReceiver:
                 "packet_rate_hz": round(ref.packet_rate_hz(), 1),
             }), 200
 
+        @app.route("/api/latest", methods=["GET"])
+        def latest():
+            pkt = ref.latest_packet()
+            if pkt is None:
+                return jsonify({"status": "no_data"}), 204
+            s = ref.status()
+            return jsonify({
+                "fsr1":        pkt.get("fsr1", 0),
+                "fsr2":        pkt.get("fsr2", 0),
+                "fsr3":        pkt.get("fsr3", 0),
+                "fsr4":        pkt.get("fsr4", 0),
+                "temperature": pkt.get("temperature"),
+                "ax":          pkt.get("ax", 0),
+                "ay":          pkt.get("ay", 0),
+                "az":          pkt.get("az", 0),
+                "timestamp":   pkt.get("timestamp", 0),
+                "rate_hz":     round(ref.packet_rate_hz(), 1),
+                "total":       ref._total_received,
+                "connected":   ref.is_connected(),
+            }), 200
+
         return app
 
     # ── Internal ingest ───────────────────────────────────────────────────────
@@ -214,10 +235,11 @@ class SoleSenseReceiver:
             return list(self._buffer)
 
     def clear(self) -> None:
-        """Empty the packet buffer and reset rate tracking."""
+        """Empty the packet buffer and reset all tracking state."""
         with self._lock:
             self._buffer.clear()
             self._arrival_times.clear()
+            self._last_received = 0.0   # reset so is_connected() → False
 
     # ── Status ────────────────────────────────────────────────────────────────
 
@@ -262,4 +284,65 @@ class SoleSenseReceiver:
             "buffer_size":      len(self._buffer),
             "last_received_s":  (round(time.time() - self._last_received, 1)
                                  if self._last_received > 0 else None),
-            "last_timestamp":   pkt.get("timestam
+            "last_timestamp":   pkt.get("timestamp") if pkt else None,
+            "last_temp_c":      pkt.get("temperature") if pkt else None,
+        }
+
+
+# ── Module-level singleton ────────────────────────────────────────────────────
+_receiver_instance: Optional[SoleSenseReceiver] = None
+
+
+def get_receiver(host: str = "0.0.0.0", port: int = 5005) -> SoleSenseReceiver:
+    """
+    Return (and lazily start) the module-level singleton receiver.
+    Safe to call multiple times — always returns the same instance.
+    """
+    global _receiver_instance
+    if _receiver_instance is None:
+        _receiver_instance = SoleSenseReceiver(host=host, port=port)
+        _receiver_instance.start()
+    return _receiver_instance
+
+
+# ── Standalone entry point ────────────────────────────────────────────────────
+if __name__ == "__main__":
+    import sys
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+    )
+
+    port = int(sys.argv[1]) if len(sys.argv) > 1 else 5005
+
+    print()
+    print("=" * 52)
+    print("  SoleSense ESP32-S3 Receiver")
+    print(f"  Listening  :  0.0.0.0:{port}")
+    print(f"  Endpoint   :  POST /api/sensor")
+    print(f"  Health     :  GET  /api/health")
+    print("=" * 52)
+    print()
+    print("  Set SERVER_IP in firmware/config.h to this")
+    print("  machine's Wi-Fi IP address, then flash the ESP32.")
+    print()
+    print("  Press Ctrl+C to stop.")
+    print()
+
+    r = SoleSenseReceiver(host="0.0.0.0", port=port)
+    r.start()
+
+    try:
+        while True:
+            time.sleep(2)
+            s  = r.status()
+            tag = "CONNECTED  " if s["connected"] else "WAITING... "
+            print(f"\r  [{tag}]  "
+                  f"rate={s['packet_rate_hz']:5.1f} Hz  "
+                  f"recv={s['total_received']:6d}  "
+                  f"err={s['total_errors']}  "
+                  f"temp={s['last_temp_c']}°C",
+                  end="", flush=True)
+    except KeyboardInterrupt:
+        print("\nStopped.")

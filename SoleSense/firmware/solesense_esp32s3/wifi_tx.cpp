@@ -1,44 +1,20 @@
 /**
  * SoleSense ESP32-S3 Firmware
- * wifi_tx.cpp  —  Wi-Fi connection and HTTP POST implementation
+ * wifi_tx.cpp  —  Wi-Fi ACCESS POINT mode + HTTP POST
  *
- * See wifi_tx.h for full documentation and JSON schema.
+ * The ESP32-S3 runs as a Wi-Fi Access Point (hotspot).
+ * The laptop connects TO the ESP32 — no router or phone needed.
  *
- * ─── JSON output format ──────────────────────────────────────────────────────
+ * Network layout:
+ *   ESP32-S3  →  hotspot "SoleSense"  →  laptop connects
+ *   ESP32 IP  : 192.168.4.1  (fixed, always)
+ *   Laptop IP : 192.168.4.2  (assigned by ESP32 DHCP, almost always .2)
  *
- *  FLAT — all fields at top level, no nesting:
+ * Data flow:
+ *   sensors_read() → wifi_send_packet() → HTTP POST → laptop:5005/api/sensor
  *
- *  {
- *    "timestamp": 123456789,
- *    "fsr1":      421,
- *    "fsr2":      380,
- *    "fsr3":      210,
- *    "fsr4":      510,
- *    "temperature": 31.42,
- *    "ax":  0.0312,
- *    "ay": -0.0198,
- *    "az":  0.9871,
- *    "gx":  1.2400,
- *    "gy": -0.8100,
- *    "gz":  0.3200
- *  }
- *
- *  This matches src/hardware_input.parse_flat_packet() on the Python side.
- *
- * ─── Why HTTP POST and not WebSocket ─────────────────────────────────────────
- *
- *  At 20 Hz with a ~200 byte payload, HTTP POST adds roughly 1–3 ms of
- *  connection overhead per packet on a local network.  That is acceptable
- *  for a 50 ms sample interval and requires no persistent connection state
- *  on the ESP32.  WebSocket would be marginally faster but adds a library
- *  dependency and more complex reconnect logic.  HTTP POST is simpler and
- *  works reliably with Flask's standard request handling.
- *
- * ─── Libraries ───────────────────────────────────────────────────────────────
- *
- *  WiFi.h       — ESP32 Arduino core (no install needed)
- *  HTTPClient.h — ESP32 Arduino core (no install needed)
- *  ArduinoJson  — install via Library Manager: "ArduinoJson" by Benoit Blanchon ≥ 6
+ * Libraries (all built into ESP32 Arduino core — no install needed):
+ *   WiFi.h, HTTPClient.h, ArduinoJson (install separately via Library Manager)
  */
 
 #include "wifi_tx.h"
@@ -49,22 +25,14 @@
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  Module-private state
-// ─────────────────────────────────────────────────────────────────────────────
+// ── Module state ──────────────────────────────────────────────────────────────
+static uint32_t _tx_ok_total   = 0;
+static uint32_t _tx_fail_total = 0;
+static String   _server_url;
 
-static bool     _was_connected      = false;
-static uint32_t _last_reconnect_ms  = 0;
-static uint32_t _tx_ok_total        = 0;
-static uint32_t _tx_fail_total      = 0;
-
-// Pre-built URL string — constructed once in wifi_connect() so it is not
-// rebuilt on every send.
-static String _server_url;
-
-// ─────────────────────────────────────────────────────────────────────────────
-//  wifi_connect()
-// ─────────────────────────────────────────────────────────────────────────────
+// ── wifi_connect() ────────────────────────────────────────────────────────────
+// Starts the ESP32 as a Wi-Fi Access Point.
+// Returns immediately after AP is up — no waiting for a client to join.
 
 bool wifi_connect() {
 
@@ -75,124 +43,88 @@ bool wifi_connect() {
 
     Serial.println();
     Serial.println(F("[WiFi] ─────────────────────────────────────"));
-    Serial.printf( "[WiFi] SSID    : %s\n", WIFI_SSID);
-    Serial.printf( "[WiFi] Target  : %s\n", _server_url.c_str());
-    Serial.print(  F("[WiFi] Connecting"));
+    Serial.println(F("[WiFi] Mode    : ACCESS POINT (ESP32 is the hotspot)"));
+    Serial.printf( "[WiFi] SSID    : %s\n", AP_SSID);
+    Serial.printf( "[WiFi] Password: %s\n", AP_PASSWORD);
 
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    // Start AP — ESP32 gets fixed IP 192.168.4.1 automatically
+    bool ok = WiFi.softAP(AP_SSID, AP_PASSWORD, AP_CHANNEL);
 
-    uint32_t t_start = millis();
-    while (WiFi.status() != WL_CONNECTED) {
-        if (millis() - t_start > (uint32_t)WIFI_CONNECT_TIMEOUT_MS) {
-            Serial.println();
-            Serial.println(F("[WiFi] TIMEOUT — could not connect within limit."));
-            Serial.println(F("[WiFi] Sensor loop will start; reconnect is automatic."));
-            Serial.println(F("[WiFi] Check WIFI_SSID / WIFI_PASSWORD in config.h."));
-            return false;
-        }
-        delay(250);
-        Serial.print('.');
+    if (!ok) {
+        Serial.println(F("[WiFi] ERROR — softAP() failed. Check board selection."));
+        return false;
     }
 
-    _was_connected = true;
+    delay(200);   // give AP a moment to fully initialise before printing IP
+
+    Serial.println(F("[WiFi] Hotspot ACTIVE"));
+    Serial.printf( "[WiFi] ESP32 IP : %s\n", WiFi.softAPIP().toString().c_str());
+    Serial.println(F("[WiFi] ─────────────────────────────────────"));
     Serial.println();
-    wifi_print_status();
+    Serial.println(F(">>> ACTION REQUIRED <<<"));
+    Serial.println(F("    1. On your laptop, open Wi-Fi settings"));
+    Serial.printf( "    2. Connect to network: \"%s\"\n", AP_SSID);
+    Serial.printf( "    3. Password          : \"%s\"\n", AP_PASSWORD);
+    Serial.println(F("    4. Run: python -m hardware.esp32_receiver"));
+    Serial.println(F("    5. Run: ipconfig  — verify laptop IP is 192.168.4.2"));
+    Serial.println();
+    Serial.printf( "[WiFi] Will send packets to: %s\n", _server_url.c_str());
+    Serial.println(F("[WiFi] Sensor loop starting now..."));
+    Serial.println();
+
     return true;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  wifi_is_connected()
-// ─────────────────────────────────────────────────────────────────────────────
+// ── wifi_is_connected() ───────────────────────────────────────────────────────
+// In AP mode, "connected" means at least one client (laptop) has joined.
 
 bool wifi_is_connected() {
-    return WiFi.status() == WL_CONNECTED;
+    return WiFi.softAPgetStationNum() > 0;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  wifi_maintain()
-// ─────────────────────────────────────────────────────────────────────────────
+// ── wifi_maintain() ───────────────────────────────────────────────────────────
+// In AP mode the hotspot stays up automatically — nothing to reconnect.
+// We just print a message when the laptop connects or disconnects.
+
+static bool _client_was_connected = false;
 
 void wifi_maintain() {
-    if (WiFi.status() == WL_CONNECTED) {
-        if (!_was_connected) {
-            // Just reconnected — announce it
-            _was_connected = true;
-            Serial.println(F("[WiFi] Reconnected."));
-            wifi_print_status();
-        }
-        return;
+    bool client_now = wifi_is_connected();
+
+    if (client_now && !_client_was_connected) {
+        _client_was_connected = true;
+        Serial.println(F("[WiFi] Laptop connected to hotspot — starting TX"));
     }
 
-    // Disconnected path
-    if (_was_connected) {
-        _was_connected = false;
-        Serial.println(F("[WiFi] Connection lost — will retry automatically."));
-    }
-
-    uint32_t now = millis();
-    if (now - _last_reconnect_ms >= (uint32_t)WIFI_RECONNECT_INTERVAL_MS) {
-        _last_reconnect_ms = now;
-        if (DEBUG_MODE) {
-            Serial.println(F("[WiFi] Attempting reconnect..."));
-        }
-        WiFi.disconnect(true);
-        delay(100);
-        WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    if (!client_now && _client_was_connected) {
+        _client_was_connected = false;
+        Serial.println(F("[WiFi] Laptop disconnected from hotspot"));
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  wifi_send_packet()
+// ── wifi_send_packet() ────────────────────────────────────────────────────────
+// Serialises sensor data to flat JSON and HTTP POSTs to the laptop receiver.
 //
-//  Builds the flat JSON payload and POSTs it.
-//  JSON field layout (matches src/hardware_input.parse_flat_packet):
-//
-//    "timestamp"   uint32  millis()
-//    "fsr1"        uint16  calibrated ADC  (forefoot medial)
-//    "fsr2"        uint16  calibrated ADC  (forefoot lateral)
-//    "fsr3"        uint16  calibrated ADC  (midfoot)
-//    "fsr4"        uint16  calibrated ADC  (heel)
-//    "temperature" float   °C  (present only when TMP117 ok)
-//    "ax"          float   g
-//    "ay"          float   g
-//    "az"          float   g
-//    "gx"          float   °/s
-//    "gy"          float   °/s
-//    "gz"          float   °/s
-// ─────────────────────────────────────────────────────────────────────────────
+// JSON schema (flat, matches src/hardware_input.parse_flat_packet):
+//   timestamp, fsr1, fsr2, fsr3, fsr4, temperature, ax, ay, az, gx, gy, gz
 
 bool wifi_send_packet(const SensorPacket &pkt) {
+
+    // Only send if a client is connected — avoids TCP errors when laptop is absent
     if (!wifi_is_connected()) return false;
 
-    // StaticJsonDocument capacity:
-    //   timestamp (10) + 4 × fsr (5×8) + temp (16) + 6 × imu (8×8)
-    //   ≈ 150 chars payload; 256 bytes is comfortably sufficient.
     StaticJsonDocument<256> doc;
 
-    // ── Timestamp ─────────────────────────────────────────────────────────────
     doc["timestamp"] = pkt.timestamp_ms;
+    doc["fsr1"]      = pkt.fsr.calibrated[0];
+    doc["fsr2"]      = pkt.fsr.calibrated[1];
+    doc["fsr3"]      = pkt.fsr.calibrated[2];
+    doc["fsr4"]      = pkt.fsr.calibrated[3];
 
-    // ── FSR channels ──────────────────────────────────────────────────────────
-    // Flat integer fields — no nesting.
-    // Names "fsr1".."fsr4" match the required schema in Task 5.
-    doc["fsr1"] = pkt.fsr.calibrated[0];   // forefoot medial  (FSR1_REGION)
-    doc["fsr2"] = pkt.fsr.calibrated[1];   // forefoot lateral (FSR2_REGION)
-    doc["fsr3"] = pkt.fsr.calibrated[2];   // midfoot          (FSR3_REGION)
-    doc["fsr4"] = pkt.fsr.calibrated[3];   // heel             (FSR4_REGION)
-
-    // ── Temperature ───────────────────────────────────────────────────────────
-    // Omit the field entirely if TMP117 is unavailable.
-    // Python parse_flat_packet() treats a missing key the same as null.
     if (pkt.tmp117.ok) {
         doc["temperature"] = serialized(String(pkt.tmp117.temperature_c, 2));
     }
-    // else: key not added → Python receives no "temperature" key
 
-    // ── IMU ───────────────────────────────────────────────────────────────────
-    // Send 0.0 for all axes when MPU6050 is not available.
-    // This makes the packet always valid (ax..gz always present) and
-    // lets the Python side detect "no IMU" via accel_magnitude ≈ 0.
     doc["ax"] = serialized(String(pkt.mpu.ax, 4));
     doc["ay"] = serialized(String(pkt.mpu.ay, 4));
     doc["az"] = serialized(String(pkt.mpu.az, 4));
@@ -200,61 +132,41 @@ bool wifi_send_packet(const SensorPacket &pkt) {
     doc["gy"] = serialized(String(pkt.mpu.gy, 4));
     doc["gz"] = serialized(String(pkt.mpu.gz, 4));
 
-    // ── Serialise ─────────────────────────────────────────────────────────────
     String payload;
     payload.reserve(200);
     serializeJson(doc, payload);
 
-    // ── HTTP POST ─────────────────────────────────────────────────────────────
     HTTPClient http;
     http.begin(_server_url);
     http.setTimeout(HTTP_TIMEOUT_MS);
     http.addHeader(F("Content-Type"), F("application/json"));
 
-    int http_code = http.POST(payload);
+    int code = http.POST(payload);
     http.end();
 
-    bool ok = (http_code == 200);
-
+    bool ok = (code == 200);
     if (ok) {
         _tx_ok_total++;
     } else {
         _tx_fail_total++;
         if (DEBUG_MODE) {
-            // Only print failures — successful packets are silent to keep
-            // the Serial log readable during normal operation.
-            if (http_code > 0) {
-                Serial.printf("[WiFi] POST returned HTTP %d  (ok=%lu fail=%lu)\n",
-                              http_code, _tx_ok_total, _tx_fail_total);
-            } else {
-                // Negative codes are WiFi/TCP errors from HTTPClient
-                Serial.printf("[WiFi] POST error %d  (ok=%lu fail=%lu)\n",
-                              http_code, _tx_ok_total, _tx_fail_total);
-            }
+            Serial.printf("[WiFi] POST %s  code=%d  ok=%lu  fail=%lu\n",
+                          ok ? "OK" : "FAIL", code,
+                          _tx_ok_total, _tx_fail_total);
         }
     }
-
     return ok;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  wifi_print_status()
-// ─────────────────────────────────────────────────────────────────────────────
+// ── wifi_print_status() ───────────────────────────────────────────────────────
 
 void wifi_print_status() {
     Serial.println(F("[WiFi] ─────────────────────────────────────"));
-    if (WiFi.status() == WL_CONNECTED) {
-        Serial.println(F("[WiFi] Status  : CONNECTED"));
-        Serial.printf( "[WiFi] SSID    : %s\n",  WiFi.SSID().c_str());
-        Serial.printf( "[WiFi] IP      : %s\n",  WiFi.localIP().toString().c_str());
-        Serial.printf( "[WiFi] Gateway : %s\n",  WiFi.gatewayIP().toString().c_str());
-        Serial.printf( "[WiFi] RSSI    : %d dBm\n", (int)WiFi.RSSI());
-        Serial.printf( "[WiFi] Target  : %s\n",  _server_url.c_str());
-        Serial.printf( "[WiFi] TX ok/fail: %lu / %lu\n",
-                       _tx_ok_total, _tx_fail_total);
-    } else {
-        Serial.println(F("[WiFi] Status  : DISCONNECTED"));
-        Serial.printf( "[WiFi] Last target: %s\n", _server_url.c_str());
-    }
+    Serial.println(F("[WiFi] Mode     : ACCESS POINT"));
+    Serial.printf( "[WiFi] SSID     : %s\n",  AP_SSID);
+    Serial.printf( "[WiFi] ESP32 IP : %s\n",  WiFi.softAPIP().toString().c_str());
+    Serial.printf( "[WiFi] Clients  : %d connected\n", WiFi.softAPgetStationNum());
+    Serial.printf( "[WiFi] Target   : %s\n",  _server_url.c_str());
+    Serial.printf( "[WiFi] TX ok/fail: %lu / %lu\n", _tx_ok_total, _tx_fail_total);
     Serial.println(F("[WiFi] ─────────────────────────────────────"));
 }

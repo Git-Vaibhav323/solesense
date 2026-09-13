@@ -64,7 +64,7 @@ import numpy as np
 import pandas as pd
 from typing import Optional
 
-from hardware.sensor_schema import SensorPacket, FSR_ADC_MAX
+from src.hardware_input import FSR_ADC_MAX, FSR_SCALE_KPA, MIN_LOAD_FRACTION, FRAME_DURATION_S
 
 # ── Scaling constants ─────────────────────────────────────────────────────────
 # Typical peak plantar pressure range: 100–800 kPa
@@ -125,75 +125,82 @@ class HardwareAdapter:
         if len(packets) < 2:
             return None
 
-        # Trim to window
-        if packets[-1].received_at and packets[0].received_at:
-            cutoff = packets[-1].received_at - self.window_s
-            packets = [p for p in packets if p.received_at and p.received_at >= cutoff]
+        # Trim to window — packets are plain dicts with "received_at" key
+        last_t = packets[-1].get("received_at") if packets else None
+        if last_t:
+            cutoff  = last_t - self.window_s
+            packets = [p for p in packets
+                       if p.get("received_at", 0) >= cutoff]
 
         if len(packets) < 2:
             return None
 
-        # ── FSR arrays ────────────────────────────────────────────────────────
-        # Scale ADC → proxy kPa
-        def _fsr_kpa(pkt: SensorPacket) -> float:
-            """Sum of all 4 FSR channels as proxy kPa."""
-            total_adc = pkt.fsr.total()
+        # ── FSR arrays — flat dict keys ───────────────────────────────────────
+        def _fsr_kpa(pkt: dict) -> float:
+            total_adc = (pkt.get("fsr1", 0) + pkt.get("fsr2", 0)
+                       + pkt.get("fsr3", 0) + pkt.get("fsr4", 0))
             return (total_adc / FSR_ADC_MAX) * FSR_SCALE_KPA
 
-        press_kpa_arr   = np.array([_fsr_kpa(p) for p in packets])
-        press_max_kpa   = float(press_kpa_arr.max())
-        press_mean_kpa  = float(press_kpa_arr.mean())
+        press_kpa_arr  = np.array([_fsr_kpa(p) for p in packets])
+        press_max_kpa  = float(press_kpa_arr.max())
+        press_mean_kpa = float(press_kpa_arr.mean())
+        pti_total      = float(np.sum(press_kpa_arr) * FRAME_DURATION_S)
 
-        # PTI proxy: sum of press_kpa * frame_duration
-        pti_total = float(np.sum(press_kpa_arr) * FRAME_DURATION_S)
+        # ── Regional fractions ────────────────────────────────────────────────
+        def _ff(p):
+            t = p.get("fsr1",0)+p.get("fsr2",0)+p.get("fsr3",0)+p.get("fsr4",0)
+            return (p.get("fsr1",0)+p.get("fsr2",0))/t if t > 0 else 0.0
+        def _rf(p):
+            t = p.get("fsr1",0)+p.get("fsr2",0)+p.get("fsr3",0)+p.get("fsr4",0)
+            return p.get("fsr4",0)/t if t > 0 else 0.0
+        def _mf(p):
+            t = p.get("fsr1",0)+p.get("fsr2",0)+p.get("fsr3",0)+p.get("fsr4",0)
+            return p.get("fsr3",0)/t if t > 0 else 0.0
 
-        # ── Regional fractions (mean over window) ─────────────────────────────
-        ff_fracs = np.array([p.fsr.forefoot_fraction() for p in packets])
-        rf_fracs = np.array([p.fsr.rearfoot_fraction() for p in packets])
-        mf_fracs = np.array([p.fsr.midfoot_fraction()  for p in packets])
+        ff_fracs = np.array([_ff(p) for p in packets])
+        rf_fracs = np.array([_rf(p) for p in packets])
+        mf_fracs = np.array([_mf(p) for p in packets])
 
         load_frac_forefoot = float(ff_fracs.mean())
         load_frac_rearfoot = float(rf_fracs.mean())
         load_frac_midfoot  = float(mf_fracs.mean())
         load_frac_toe      = max(0.0, 1.0 - load_frac_forefoot
-                                           - load_frac_rearfoot
-                                           - load_frac_midfoot)
+                                          - load_frac_rearfoot
+                                          - load_frac_midfoot)
 
-        # ── Step timing proxy (gait variability) ──────────────────────────────
+        # ── Step timing proxy ─────────────────────────────────────────────────
         step_time_std_s = self._estimate_step_time_std(packets, press_kpa_arr)
 
-        # ── Persistence (fraction of packets above PTI threshold) ─────────────
+        # ── Persistence ───────────────────────────────────────────────────────
         pti_threshold = FSR_SCALE_KPA * PTI_PERSISTENCE_THRESHOLD_FRACTION
-        n_elevated    = int(np.sum(press_kpa_arr > pti_threshold))
-        persistence   = n_elevated / len(press_kpa_arr)
+        persistence   = int(np.sum(press_kpa_arr > pti_threshold)) / len(press_kpa_arr)
 
         # ── Temperature ───────────────────────────────────────────────────────
-        temps = [p.temp for p in packets if p.temp is not None]
+        temps  = [p["temperature"] for p in packets if p.get("temperature") is not None]
         temp_c = float(np.mean(temps)) if temps else None
 
         # ── IMU derived ───────────────────────────────────────────────────────
-        imu_pkts = [p for p in packets if p.imu is not None]
+        imu_pkts = [p for p in packets
+                    if abs(p.get("ax",0))+abs(p.get("ay",0))+abs(p.get("az",0)) > 0.001]
         if imu_pkts:
-            accel_mags = np.array([p.imu.accel_magnitude() for p in imu_pkts])
-            gyro_mags  = np.array([p.imu.gyro_magnitude()  for p in imu_pkts])
-            accel_mag  = float(accel_mags.mean())
-            gyro_mag   = float(gyro_mags.mean())
-            # CoP path proxy: scale accel variance to cm range
-            cop_proxy  = float(np.std(accel_mags) * 20.0)
+            accel_mags = np.array([
+                (p.get("ax",0)**2+p.get("ay",0)**2+p.get("az",0)**2)**0.5
+                for p in imu_pkts])
+            gyro_mags  = np.array([
+                (p.get("gx",0)**2+p.get("gy",0)**2+p.get("gz",0)**2)**0.5
+                for p in imu_pkts])
+            accel_mag = float(accel_mags.mean())
+            gyro_mag  = float(gyro_mags.mean())
+            cop_proxy = float(np.std(accel_mags) * 20.0)
         else:
-            accel_mag = 0.0
-            gyro_mag  = 0.0
-            cop_proxy = 0.0
+            accel_mag = gyro_mag = cop_proxy = 0.0
 
-        # ── Stance time proxy ─────────────────────────────────────────────────
+        # ── Stance / cadence ──────────────────────────────────────────────────
         stance_time_s = self._estimate_stance_time(press_kpa_arr, FRAME_DURATION_S)
-
-        # ── Cadence proxy ─────────────────────────────────────────────────────
-        cadence = self._estimate_cadence(press_kpa_arr, FRAME_DURATION_S)
+        cadence       = self._estimate_cadence(press_kpa_arr, FRAME_DURATION_S)
 
         # ── Build feature row ─────────────────────────────────────────────────
         row = pd.Series({
-            # ── Used by risk engine ──────────────────────────────────────────
             "press_max_kpa":                press_max_kpa,
             "press_mean_kpa":               press_mean_kpa,
             "pti_total_kpa_s":              pti_total,
@@ -203,30 +210,24 @@ class HardwareAdapter:
             "load_frac_toe":                load_frac_toe,
             "step_time_std_s":              step_time_std_s,
             "persistence_pti_total_kpa_s":  persistence,
-
-            # ── Bilateral — NOT AVAILABLE on single insole ───────────────────
-            "asym_pti_total_kpa_s":         0.0,   # NOT_AVAILABLE
-            "asym_press_mean_kpa":          0.0,   # NOT_AVAILABLE
-            "gait_symmetry_index":          0.0,   # NOT_AVAILABLE
-            "asym_load_forefoot":           0.0,   # NOT_AVAILABLE
-            "asym_dir_pti_total_kpa_s":     0.0,   # NOT_AVAILABLE
-            "left_loading_fraction":        1.0,   # single insole = reference
+            "asym_pti_total_kpa_s":         0.0,
+            "asym_press_mean_kpa":          0.0,
+            "gait_symmetry_index":          0.0,
+            "asym_load_forefoot":           0.0,
+            "asym_dir_pti_total_kpa_s":     0.0,
+            "left_loading_fraction":        1.0,
             "right_loading_fraction":       0.0,
-
-            # ── Extra columns for display ────────────────────────────────────
             "cop_path_length_cm":           cop_proxy,
             "stance_time_s":                stance_time_s,
             "cadence_steps_per_min":        cadence,
             "temperature_c":                temp_c if temp_c is not None else 0.0,
             "accel_magnitude_g":            accel_mag,
             "gyro_magnitude_deg_s":         gyro_mag,
-
-            # ── Metadata ─────────────────────────────────────────────────────
             "subject_id":   "HARDWARE",
             "footwear":     "LIVE",
             "trial":        "LIVE",
             "footstep_id":  int(time.time()),
-            "side":         "Left",   # single insole — user-configurable
+            "side":         "Left",
         })
 
         return row
@@ -251,8 +252,8 @@ class HardwareAdapter:
             now_stance = press_arr[i] > threshold
             if was_swing and now_stance:
                 # Use received_at if available, else index * frame_duration
-                if packets[i].received_at and packets[0].received_at:
-                    onsets.append(packets[i].received_at - packets[0].received_at)
+                if packets[i].get("received_at") and packets[0].get("received_at"):
+                    onsets.append(packets[i]["received_at"] - packets[0]["received_at"])
                 else:
                     onsets.append(i * FRAME_DURATION_S)
             in_stance = now_stance

@@ -1123,7 +1123,7 @@ def page_live_hardware():
     try:
         from hardware.esp32_receiver  import get_receiver
         from hardware.hardware_adapter import HardwareAdapter, FSR_SCALE_KPA, NOT_AVAILABLE_DOCS
-        from hardware.sensor_schema   import FSR_REGIONS, mock_packet
+        from src.hardware_input import FSR_REGION_MAP, make_mock_packet
     except ImportError as e:
         st.error(f"Hardware modules not found: {e}\n\n"
                  "Make sure you are running from `f:/Dataset/SoleSense` and the "
@@ -1183,17 +1183,19 @@ def page_live_hardware():
     if mock_mode:
         import time
         import random
-        # Generate a rolling mock window
+        from src.hardware_input import make_mock_packet
         base_t = int(time.time() * 1000)
         packets = []
         for i in range(int(window_s * 20)):
-            p = mock_packet(t=base_t + i * 50)
-            p.received_at = time.time() - (window_s - i * 0.05)
-            # add small variation so features are non-trivial
-            p.fsr.forefoot_medial  = max(0, 420 + random.randint(-40, 80))
-            p.fsr.forefoot_lateral = max(0, 380 + random.randint(-30, 60))
-            p.fsr.midfoot          = max(0, 210 + random.randint(-20, 40))
-            p.fsr.heel             = max(0, 510 + random.randint(-50, 90))
+            p = make_mock_packet(
+                timestamp=base_t + i * 50,
+                fsr1=max(0, 420 + random.randint(-40, 80)),
+                fsr2=max(0, 380 + random.randint(-30, 60)),
+                fsr3=max(0, 210 + random.randint(-20, 40)),
+                fsr4=max(0, 510 + random.randint(-50, 90)),
+                temperature=31.4,
+                received_at=time.time() - (window_s - i * 0.05),
+            )
             packets.append(p)
         status = {"connected": True, "packet_rate_hz": 20.0,
                   "total_received": len(packets), "total_errors": 0,
@@ -1257,19 +1259,31 @@ def page_live_hardware():
 
     if latest:
         c1, c2, c3, c4, c5, c6 = st.columns(6)
-        fsr = latest.fsr
+
+        # latest is a plain dict from parse_flat_packet()
+        fsr1 = latest.get("fsr1", 0)
+        fsr2 = latest.get("fsr2", 0)
+        fsr3 = latest.get("fsr3", 0)
+        fsr4 = latest.get("fsr4", 0)
+        temp = latest.get("temperature")
+        ax   = latest.get("ax", 0.0)
+        ay   = latest.get("ay", 0.0)
+        az   = latest.get("az", 0.0)
+        gx   = latest.get("gx", 0.0)
+        gy   = latest.get("gy", 0.0)
+        gz   = latest.get("gz", 0.0)
+        accel_mag = (ax**2 + ay**2 + az**2) ** 0.5
 
         for col, name, val, color in [
-            (c1, "Forefoot Med.",  fsr.forefoot_medial,  C["left"]),
-            (c2, "Forefoot Lat.",  fsr.forefoot_lateral, C["left"]),
-            (c3, "Midfoot",        fsr.midfoot,          C["accent"]),
-            (c4, "Heel",           fsr.heel,             C["right"]),
+            (c1, "Forefoot Med.",  fsr1, C["left"]),
+            (c2, "Forefoot Lat.",  fsr2, C["left"]),
+            (c3, "Midfoot",        fsr3, C["accent"]),
+            (c4, "Heel",           fsr4, C["right"]),
             (c5, "Temperature",
-             f"{latest.temp:.1f} °C" if latest.temp is not None else "N/A",
+             f"{temp:.1f} °C" if temp is not None else "N/A",
              C["monitor"]),
             (c6, "Accel |g|",
-             f"{latest.imu.accel_magnitude():.3f} g"
-             if latest.imu else "N/A",
+             f"{accel_mag:.3f} g",
              C["neutral"]),
         ]:
             v = f"{val}" if isinstance(val, int) else val
@@ -1279,16 +1293,16 @@ def page_live_hardware():
                 unsafe_allow_html=True,
             )
 
-        # IMU row
-        if latest.imu:
+        # IMU row — show if any axis is non-zero
+        if abs(ax) + abs(ay) + abs(az) > 0.001:
             i1, i2, i3, i4, i5, i6 = st.columns(6)
             for col, lbl, val in [
-                (i1, "AX (g)",   f"{latest.imu.ax:+.4f}"),
-                (i2, "AY (g)",   f"{latest.imu.ay:+.4f}"),
-                (i3, "AZ (g)",   f"{latest.imu.az:+.4f}"),
-                (i4, "GX (°/s)", f"{latest.imu.gx:+.3f}"),
-                (i5, "GY (°/s)", f"{latest.imu.gy:+.3f}"),
-                (i6, "GZ (°/s)", f"{latest.imu.gz:+.3f}"),
+                (i1, "AX (g)",   f"{ax:+.4f}"),
+                (i2, "AY (g)",   f"{ay:+.4f}"),
+                (i3, "AZ (g)",   f"{az:+.4f}"),
+                (i4, "GX (°/s)", f"{gx:+.3f}"),
+                (i5, "GY (°/s)", f"{gy:+.3f}"),
+                (i6, "GZ (°/s)", f"{gz:+.3f}"),
             ]:
                 col.markdown(
                     f'<div class="mc"><h4>{lbl}</h4>'
@@ -1301,12 +1315,11 @@ def page_live_hardware():
                 unsafe_allow_html=True)
 
     if packets:
-        # Mean calibrated value per region over the window
         import numpy as np
-        fm_arr = np.array([p.fsr.forefoot_medial  for p in packets], dtype=float)
-        fl_arr = np.array([p.fsr.forefoot_lateral for p in packets], dtype=float)
-        mf_arr = np.array([p.fsr.midfoot          for p in packets], dtype=float)
-        hl_arr = np.array([p.fsr.heel             for p in packets], dtype=float)
+        fm_arr = np.array([p.get("fsr1", 0) for p in packets], dtype=float)
+        fl_arr = np.array([p.get("fsr2", 0) for p in packets], dtype=float)
+        mf_arr = np.array([p.get("fsr3", 0) for p in packets], dtype=float)
+        hl_arr = np.array([p.get("fsr4", 0) for p in packets], dtype=float)
 
         region_means = {
             "Forefoot Medial":  float(fm_arr.mean()),
@@ -1336,15 +1349,16 @@ def page_live_hardware():
         r2c1, r2c2 = st.columns([1, 2])
         with r2c1:
             if latest:
-                fracs = latest.fsr.fractions()
+                total = latest.get("fsr1",0)+latest.get("fsr2",0)+latest.get("fsr3",0)+latest.get("fsr4",0)
+                total = total if total > 0 else 1
                 st.plotly_chart(donut_regional(
                     left_vals=[
-                        fracs.get("forefoot_medial", 0) * 100,
-                        fracs.get("forefoot_lateral", 0) * 100,
-                        fracs.get("midfoot", 0) * 100,
-                        fracs.get("heel", 0) * 100,
+                        latest.get("fsr1", 0) / total * 100,
+                        latest.get("fsr2", 0) / total * 100,
+                        latest.get("fsr3", 0) / total * 100,
+                        latest.get("fsr4", 0) / total * 100,
                     ],
-                    right_vals=[0, 0, 0, 0],   # single insole
+                    right_vals=[0, 0, 0, 0],
                 ), use_container_width=True)
         with r2c2:
             st.plotly_chart(fig_fsr, use_container_width=True)
@@ -1366,12 +1380,12 @@ def page_live_hardware():
         st.plotly_chart(fig_ts, use_container_width=True)
 
     # ── temperature trend ─────────────────────────────────────────────────────
-    temp_pkts = [p for p in packets if p.temp is not None]
+    temp_pkts = [p for p in packets if p.get("temperature") is not None]
     if temp_pkts:
         st.markdown('<div class="sh">③ Temperature Trend</div>',
                     unsafe_allow_html=True)
         import numpy as np
-        temp_vals = [p.temp for p in temp_pkts]
+        temp_vals = [p["temperature"] for p in temp_pkts]
         fig_temp = go.Figure()
         fig_temp.add_trace(go.Scatter(
             y=temp_vals,
@@ -1389,15 +1403,15 @@ def page_live_hardware():
         st.plotly_chart(fig_temp, use_container_width=True)
 
     # ── IMU motion ────────────────────────────────────────────────────────────
-    imu_pkts = [p for p in packets if p.imu is not None]
+    imu_pkts = [p for p in packets if abs(p.get("ax",0))+abs(p.get("ay",0))+abs(p.get("az",0)) > 0.001]
     if imu_pkts:
         st.markdown('<div class="sh">④ IMU Motion</div>',
                     unsafe_allow_html=True)
         import numpy as np
-        ax_v = [p.imu.ax for p in imu_pkts]
-        ay_v = [p.imu.ay for p in imu_pkts]
-        az_v = [p.imu.az for p in imu_pkts]
-        am_v = [p.imu.accel_magnitude() for p in imu_pkts]
+        ax_v = [p.get("ax", 0.0) for p in imu_pkts]
+        ay_v = [p.get("ay", 0.0) for p in imu_pkts]
+        az_v = [p.get("az", 0.0) for p in imu_pkts]
+        am_v = [(p.get("ax",0)**2 + p.get("ay",0)**2 + p.get("az",0)**2)**0.5 for p in imu_pkts]
 
         fig_imu = go.Figure()
         for vals, name, color in [

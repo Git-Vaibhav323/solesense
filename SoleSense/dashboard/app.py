@@ -1108,16 +1108,440 @@ def page_dataset_explorer():
 #  Navigation & entry point
 # ═════════════════════════════════════════════════════════════════════════════
 
+# ═════════════════════════════════════════════════════════════════════════════
+#  PAGE 3 — Live Hardware  (ESP32-S3 Wi-Fi stream)
+# ═════════════════════════════════════════════════════════════════════════════
+
+def page_live_hardware():
+    """
+    Live ESP32-S3 sensor dashboard.
+    Starts the Flask receiver once (singleton) and auto-refreshes every 2 s.
+    """
+    _header("Live Hardware &nbsp;|&nbsp; ESP32-S3 · FSR + TMP117 + MPU6050")
+
+    # ── lazy import hardware modules ──────────────────────────────────────────
+    try:
+        from hardware.esp32_receiver  import get_receiver
+        from hardware.hardware_adapter import HardwareAdapter, FSR_SCALE_KPA, NOT_AVAILABLE_DOCS
+        from hardware.sensor_schema   import FSR_REGIONS, mock_packet
+    except ImportError as e:
+        st.error(f"Hardware modules not found: {e}\n\n"
+                 "Make sure you are running from `f:/Dataset/SoleSense` and the "
+                 "`hardware/` folder exists.")
+        return
+
+    # ── sidebar ───────────────────────────────────────────────────────────────
+    with st.sidebar:
+        st.markdown("## 🔌 Hardware Settings")
+        st.markdown("---")
+        receiver_port = st.number_input("Receiver Port", value=5005,
+                                        min_value=1024, max_value=65535,
+                                        step=1, key="hw_port")
+        window_s = st.slider("Analysis window (s)", 1.0, 10.0, 5.0, 0.5,
+                             key="hw_win")
+        refresh_s = st.slider("Dashboard refresh (s)", 1, 10, 2, 1,
+                              key="hw_ref")
+        mock_mode = st.checkbox("🧪 Mock mode (no hardware)", value=False,
+                                key="hw_mock")
+        st.markdown(
+            '<div class="disc">⚠ EXPERIMENTAL — Not for clinical use.</div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown("---")
+        st.markdown(
+            "**Setup:**\n"
+            "1. Set `SERVER_IP` in `firmware/config.h`\n"
+            "2. Flash ESP32-S3\n"
+            "3. Power insole\n"
+            "4. Data appears below ↓"
+        )
+
+    # ── start receiver ────────────────────────────────────────────────────────
+    receiver = get_receiver(host="0.0.0.0", port=int(receiver_port))
+    adapter  = HardwareAdapter(window_s=window_s)
+
+    # ── how-to banner ─────────────────────────────────────────────────────────
+    if not mock_mode:
+        import socket
+        try:
+            laptop_ip = socket.gethostbyname(socket.gethostname())
+        except Exception:
+            laptop_ip = "run: ipconfig (Windows) / ip addr (Linux)"
+
+        st.markdown(
+            f'<div style="background:#0D1B2A;border:1px solid #1565C0;'
+            f'border-radius:10px;padding:12px 18px;margin-bottom:14px;">'
+            f'<b style="color:#42A5F5">📡 Receiver active</b> &nbsp;'
+            f'<span style="color:#90CAF9;font-size:0.88rem">'
+            f'Listening on port <b>{int(receiver_port)}</b> &nbsp;|&nbsp; '
+            f'Set <code>SERVER_IP = "{laptop_ip}"</code> in firmware config.h'
+            f'</span></div>',
+            unsafe_allow_html=True,
+        )
+
+    # ── get data ──────────────────────────────────────────────────────────────
+    if mock_mode:
+        import time
+        import random
+        # Generate a rolling mock window
+        base_t = int(time.time() * 1000)
+        packets = []
+        for i in range(int(window_s * 20)):
+            p = mock_packet(t=base_t + i * 50)
+            p.received_at = time.time() - (window_s - i * 0.05)
+            # add small variation so features are non-trivial
+            p.fsr.forefoot_medial  = max(0, 420 + random.randint(-40, 80))
+            p.fsr.forefoot_lateral = max(0, 380 + random.randint(-30, 60))
+            p.fsr.midfoot          = max(0, 210 + random.randint(-20, 40))
+            p.fsr.heel             = max(0, 510 + random.randint(-50, 90))
+            packets.append(p)
+        status = {"connected": True, "packet_rate_hz": 20.0,
+                  "total_received": len(packets), "total_errors": 0,
+                  "buffer_size": len(packets), "last_received_s": 0.0,
+                  "last_esp32_t_ms": base_t, "last_temp_c": 31.4}
+        latest = packets[-1] if packets else None
+    else:
+        packets = receiver.recent_packets(n=int(window_s * 20))
+        status  = receiver.status()
+        latest  = receiver.latest_packet()
+
+    # ── connection status bar ─────────────────────────────────────────────────
+    conn      = status["connected"]
+    conn_col  = C["normal"] if conn else C["alert"]
+    conn_dot  = "🟢" if conn else "🔴"
+    conn_text = "CONNECTED" if conn else "WAITING FOR ESP32..."
+    rate_text = f"{status['packet_rate_hz']:.1f} Hz" if conn else "—"
+    last_s    = (f"{status['last_received_s']:.1f} s ago"
+                 if status.get("last_received_s") is not None else "—")
+
+    st.markdown(
+        f'<div style="background:#0D1B2A;border:2px solid {conn_col};'
+        f'border-radius:10px;padding:12px 20px;margin-bottom:16px;'
+        f'display:flex;align-items:center;gap:24px;">'
+        f'<span style="font-size:1.5rem">{conn_dot}</span>'
+        f'<span style="color:{conn_col};font-weight:800;font-size:1.1rem">'
+        f'{conn_text}</span>'
+        f'<span style="color:#888;font-size:0.85rem;margin-left:auto">'
+        f'Rate: <b style="color:#90CAF9">{rate_text}</b> &nbsp;|&nbsp; '
+        f'Received: <b style="color:#90CAF9">{status["total_received"]}</b> &nbsp;|&nbsp; '
+        f'Last: <b style="color:#90CAF9">{last_s}</b>'
+        f'</span></div>',
+        unsafe_allow_html=True,
+    )
+
+    if mock_mode:
+        st.info("🧪 **Mock mode** — showing synthetic sensor data. "
+                "Disable to use real ESP32 hardware.")
+
+    if not conn and not mock_mode:
+        st.markdown(
+            '<div class="sh">Waiting for ESP32-S3</div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown("""
+**Checklist:**
+1. Flash the firmware from `firmware/solesense_esp32s3/`
+2. Set `WIFI_SSID` / `WIFI_PASSWORD` / `SERVER_IP` in `config.h`
+3. Power the ESP32-S3 — it connects automatically
+4. This page auto-refreshes every few seconds
+        """)
+        # auto-rerun so page keeps checking
+        import time
+        time.sleep(int(refresh_s))
+        st.rerun()
+        return
+
+    # ── raw sensor values ─────────────────────────────────────────────────────
+    st.markdown('<div class="sh">① Raw Sensor Values</div>',
+                unsafe_allow_html=True)
+
+    if latest:
+        c1, c2, c3, c4, c5, c6 = st.columns(6)
+        fsr = latest.fsr
+
+        for col, name, val, color in [
+            (c1, "Forefoot Med.",  fsr.forefoot_medial,  C["left"]),
+            (c2, "Forefoot Lat.",  fsr.forefoot_lateral, C["left"]),
+            (c3, "Midfoot",        fsr.midfoot,          C["accent"]),
+            (c4, "Heel",           fsr.heel,             C["right"]),
+            (c5, "Temperature",
+             f"{latest.temp:.1f} °C" if latest.temp is not None else "N/A",
+             C["monitor"]),
+            (c6, "Accel |g|",
+             f"{latest.imu.accel_magnitude():.3f} g"
+             if latest.imu else "N/A",
+             C["neutral"]),
+        ]:
+            v = f"{val}" if isinstance(val, int) else val
+            col.markdown(
+                f'<div class="hwc"><h4>{name}</h4>'
+                f'<p style="color:{color}">{v}</p></div>',
+                unsafe_allow_html=True,
+            )
+
+        # IMU row
+        if latest.imu:
+            i1, i2, i3, i4, i5, i6 = st.columns(6)
+            for col, lbl, val in [
+                (i1, "AX (g)",   f"{latest.imu.ax:+.4f}"),
+                (i2, "AY (g)",   f"{latest.imu.ay:+.4f}"),
+                (i3, "AZ (g)",   f"{latest.imu.az:+.4f}"),
+                (i4, "GX (°/s)", f"{latest.imu.gx:+.3f}"),
+                (i5, "GY (°/s)", f"{latest.imu.gy:+.3f}"),
+                (i6, "GZ (°/s)", f"{latest.imu.gz:+.3f}"),
+            ]:
+                col.markdown(
+                    f'<div class="mc"><h4>{lbl}</h4>'
+                    f'<p style="font-size:1.1rem">{val}</p></div>',
+                    unsafe_allow_html=True,
+                )
+
+    # ── live FSR pressure bars ────────────────────────────────────────────────
+    st.markdown('<div class="sh">② Regional Pressure Loading</div>',
+                unsafe_allow_html=True)
+
+    if packets:
+        # Mean calibrated value per region over the window
+        import numpy as np
+        fm_arr = np.array([p.fsr.forefoot_medial  for p in packets], dtype=float)
+        fl_arr = np.array([p.fsr.forefoot_lateral for p in packets], dtype=float)
+        mf_arr = np.array([p.fsr.midfoot          for p in packets], dtype=float)
+        hl_arr = np.array([p.fsr.heel             for p in packets], dtype=float)
+
+        region_means = {
+            "Forefoot Medial":  float(fm_arr.mean()),
+            "Forefoot Lateral": float(fl_arr.mean()),
+            "Midfoot":          float(mf_arr.mean()),
+            "Heel":             float(hl_arr.mean()),
+        }
+        region_colors = [C["left"], C["left"], C["accent"], C["right"]]
+
+        fig_fsr = go.Figure(go.Bar(
+            x=list(region_means.keys()),
+            y=list(region_means.values()),
+            marker_color=region_colors,
+            text=[f"{v:.0f}" for v in region_means.values()],
+            textposition="outside",
+        ))
+        fig_fsr.add_hline(y=FSR_SCALE_KPA * 0.3, line_dash="dash",
+                          line_color=C["monitor"],
+                          annotation_text="MONITOR threshold",
+                          annotation_font_color=C["monitor"])
+        _chart_layout(fig_fsr, height=260,
+                      title=dict(text="FSR Load by Region (ADC counts)",
+                                 font=dict(size=13)))
+        fig_fsr.update_layout(yaxis=dict(range=[0, 4096]))
+
+        # Regional donut + time series side by side
+        r2c1, r2c2 = st.columns([1, 2])
+        with r2c1:
+            if latest:
+                fracs = latest.fsr.fractions()
+                st.plotly_chart(donut_regional(
+                    left_vals=[
+                        fracs.get("forefoot_medial", 0) * 100,
+                        fracs.get("forefoot_lateral", 0) * 100,
+                        fracs.get("midfoot", 0) * 100,
+                        fracs.get("heel", 0) * 100,
+                    ],
+                    right_vals=[0, 0, 0, 0],   # single insole
+                ), use_container_width=True)
+        with r2c2:
+            st.plotly_chart(fig_fsr, use_container_width=True)
+
+        # Time-series of total load
+        total_arr = fm_arr + fl_arr + mf_arr + hl_arr
+        t_axis    = list(range(len(total_arr)))
+        fig_ts = go.Figure()
+        fig_ts.add_trace(go.Scatter(
+            x=t_axis, y=total_arr,
+            mode="lines", fill="tozeroy",
+            fillcolor="rgba(21,101,192,0.15)",
+            line=dict(color=C["accent"], width=2, shape="spline"),
+            hovertemplate="Sample %{x}<br>Total load: %{y:.0f}<extra></extra>",
+        ))
+        _chart_layout(fig_ts, height=200,
+                      title=dict(text="Total FSR Load — Last Window",
+                                 font=dict(size=13)))
+        st.plotly_chart(fig_ts, use_container_width=True)
+
+    # ── temperature trend ─────────────────────────────────────────────────────
+    temp_pkts = [p for p in packets if p.temp is not None]
+    if temp_pkts:
+        st.markdown('<div class="sh">③ Temperature Trend</div>',
+                    unsafe_allow_html=True)
+        import numpy as np
+        temp_vals = [p.temp for p in temp_pkts]
+        fig_temp = go.Figure()
+        fig_temp.add_trace(go.Scatter(
+            y=temp_vals,
+            mode="lines+markers",
+            line=dict(color=C["monitor"], width=2.5, shape="spline"),
+            marker=dict(size=4),
+            hovertemplate="Sample %{x}<br>Temp: %{y:.2f} °C<extra></extra>",
+        ))
+        t_mean = float(np.mean(temp_vals))
+        fig_temp.add_hline(y=t_mean, line_dash="dot", line_color="#888",
+                           annotation_text=f"mean {t_mean:.1f} °C",
+                           annotation_font_color="#aaa")
+        _chart_layout(fig_temp, height=220,
+                      title=dict(text="Temperature (°C)", font=dict(size=13)))
+        st.plotly_chart(fig_temp, use_container_width=True)
+
+    # ── IMU motion ────────────────────────────────────────────────────────────
+    imu_pkts = [p for p in packets if p.imu is not None]
+    if imu_pkts:
+        st.markdown('<div class="sh">④ IMU Motion</div>',
+                    unsafe_allow_html=True)
+        import numpy as np
+        ax_v = [p.imu.ax for p in imu_pkts]
+        ay_v = [p.imu.ay for p in imu_pkts]
+        az_v = [p.imu.az for p in imu_pkts]
+        am_v = [p.imu.accel_magnitude() for p in imu_pkts]
+
+        fig_imu = go.Figure()
+        for vals, name, color in [
+            (ax_v, "AX", "#42A5F5"),
+            (ay_v, "AY", "#66BB6A"),
+            (az_v, "AZ", "#FFA726"),
+            (am_v, "|A|", "white"),
+        ]:
+            fig_imu.add_trace(go.Scatter(
+                y=vals, mode="lines", name=name,
+                line=dict(color=color, width=1.8, shape="spline"),
+            ))
+        _chart_layout(fig_imu, height=250,
+                      title=dict(text="Acceleration (g)", font=dict(size=13)))
+        fig_imu.update_layout(legend=dict(orientation="h", y=-0.2))
+        st.plotly_chart(fig_imu, use_container_width=True)
+
+    # ── risk engine ───────────────────────────────────────────────────────────
+    st.markdown('<div class="sh">⑤ Risk Analysis</div>',
+                unsafe_allow_html=True)
+
+    feature_row = adapter.to_feature_row(packets) if len(packets) >= 2 else None
+
+    if feature_row is None:
+        st.info("Collecting data… need at least 2 packets for risk calculation.")
+    else:
+        rr  = compute_risk(feature_row)
+        lc  = LEVEL_COLOR[rr.risk_level]
+
+        # Risk banner
+        st.markdown(
+            f'<div class="rbox" style="background:#0D1B2A;border:3px solid {lc};">'
+            f'<h1 style="color:{lc};margin:0;font-size:2.2rem">'
+            f'{LEVEL_EMOJI[rr.risk_level]}  {rr.risk_level}</h1>'
+            f'<p style="color:white;font-size:1.1rem;margin:6px 0 2px 0">'
+            f'SoleSense Risk Indicator: '
+            f'<b style="color:{lc};font-size:1.9rem">{rr.risk_score:.1f}</b>/100</p>'
+            f'<p style="color:#90CAF9;margin:0">'
+            f'Most affected: {rr.affected_region.replace("_"," ")}</p>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+        # Gauge + key features
+        rf1, rf2, rf3 = st.columns(3)
+        with rf1:
+            st.plotly_chart(gauge(rr.risk_score, "Risk Indicator"),
+                            use_container_width=True)
+        with rf2:
+            ff_pct = feature_row["load_frac_forefoot"] * 100
+            rf_pct = feature_row["load_frac_rearfoot"] * 100
+            st.markdown(
+                f'<div class="mc"><h4>Forefoot Load</h4>'
+                f'<p style="color:{C["left"]}">{ff_pct:.1f}%</p></div>'
+                f'<div class="mc"><h4>Heel Load</h4>'
+                f'<p style="color:{C["right"]}">{rf_pct:.1f}%</p></div>',
+                unsafe_allow_html=True,
+            )
+        with rf3:
+            pti   = feature_row["pti_total_kpa_s"]
+            cadence = feature_row.get("cadence_steps_per_min", 0)
+            t_c   = feature_row.get("temperature_c", 0)
+            st.markdown(
+                f'<div class="mc"><h4>PTI (proxy)</h4>'
+                f'<p>{pti:.0f}</p></div>'
+                f'<div class="mc"><h4>Cadence (est.)</h4>'
+                f'<p>{cadence:.0f} spm</p></div>',
+                unsafe_allow_html=True,
+            )
+            if t_c:
+                st.markdown(
+                    f'<div class="mc"><h4>Temperature</h4>'
+                    f'<p style="color:{C["monitor"]}">{t_c:.1f} °C</p></div>',
+                    unsafe_allow_html=True,
+                )
+
+        # Explainable risk factors
+        st.markdown("**Risk factor breakdown:**")
+        if not rr.contributing_factors:
+            st.success("✅ No risk factors triggered.")
+        _risk_factor_rows(rr)
+
+        st.markdown(
+            f'<div style="background:#1A1F2E;border-left:4px solid {lc};'
+            f'border-radius:6px;padding:12px 16px;color:#ddd;margin-top:12px">'
+            f'💡 <b>Recommended Action:</b><br>{rr.recommended_action}</div>',
+            unsafe_allow_html=True,
+        )
+
+        # Single-insole limitation notice
+        st.markdown(
+            '<div style="background:#1A1F2E;border-left:3px solid #607D8B;'
+            'border-radius:4px;padding:8px 14px;color:#90A4AE;'
+            'font-size:0.8rem;margin-top:8px">'
+            '⚠ <b>Single-insole prototype:</b> Bilateral asymmetry rules '
+            '(loading asymmetry, pressure asymmetry, gait symmetry) are '
+            'not active — these require two insoles. All other rules are live.'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+
+    st.markdown(
+        '<div class="disc">⚠ EXPERIMENTAL PROTOTYPE — Not for clinical use.</div>',
+        unsafe_allow_html=True,
+    )
+
+    # ── auto-refresh ──────────────────────────────────────────────────────────
+    import time
+    time.sleep(int(refresh_s))
+    st.rerun()
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  Navigation & entry point
+# ═════════════════════════════════════════════════════════════════════════════
+
 def main():
     _css()
 
-    tab1, tab2 = st.tabs(["🏠  Quick Analysis", "📊  Dataset Explorer"])
+    # Sidebar navigation
+    with st.sidebar:
+        st.markdown(
+            '<div style="background:linear-gradient(135deg,#1565C0 0%,#0D47A1 100%);'
+            'border-radius:10px;padding:14px 18px;margin-bottom:18px;">'
+            '<span style="color:white;font-size:1.3rem;font-weight:900;'
+            'letter-spacing:3px">👟 SOLESENSE</span>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+        page = st.radio(
+            "Navigation",
+            ["🏠  Quick Analysis",
+             "📊  Dataset Explorer",
+             "📡  Live Hardware"],
+            label_visibility="collapsed",
+        )
+        st.markdown("---")
 
-    with tab1:
+    if page == "🏠  Quick Analysis":
         page_quick_analysis()
-
-    with tab2:
+    elif page == "📊  Dataset Explorer":
         page_dataset_explorer()
+    else:
+        page_live_hardware()
 
     st.markdown(
         '<div class="footer">SoleSense · Demo Prototype · '

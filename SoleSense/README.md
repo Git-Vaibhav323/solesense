@@ -61,10 +61,11 @@ Sense → Compare → Learn → Fuse → Act
 11. [Running Tests](#11-running-tests)
 12. [Exploratory Notebook](#12-exploratory-notebook)
 13. [Current Limitations](#13-current-limitations)
-14. [Future Hardware Integration](#14-future-hardware-integration)
-15. [TinyML Roadmap](#15-tinyml-roadmap)
-16. [Configuration Reference](#16-configuration-reference)
-17. [Dataset Citation](#17-dataset-citation)
+14. [ESP32-S3 Hardware Prototype](#14-esp32-s3-hardware-prototype)
+15. [Future Hardware Integration (Full Design)](#15-future-hardware-integration-full-design)
+16. [TinyML Roadmap](#16-tinyml-roadmap)
+17. [Configuration Reference](#17-configuration-reference)
+18. [Dataset Citation](#18-dataset-citation)
 
 ---
 
@@ -619,7 +620,233 @@ Run all cells top to bottom. Saves 10 figures to `docs/figures/`:
 
 ---
 
-## 14. Future Hardware Integration
+## 14. ESP32-S3 Hardware Prototype
+
+This section covers the **current physical prototype** — one insole, ESP32-S3, 4 FSRs,
+TMP117, and MPU6050 streaming live over Wi-Fi to the existing SoleSense dashboard.
+
+### Prototype architecture
+
+```
+4 × FSR + TMP117 + MPU6050
+          ↓
+      ESP32-S3
+          ↓
+         Wi-Fi  (HTTP POST, 20 Hz)
+          ↓
+  Python receiver  (hardware/esp32_receiver.py)
+          ↓
+  SoleSense adapter  (hardware/hardware_adapter.py)
+          ↓
+  Existing analytics (feature engine + risk engine)
+          ↓
+  Streamlit dashboard  →  📡 Live Hardware page
+```
+
+### Hardware bill of materials
+
+| Component | Qty | Notes |
+|---|---|---|
+| ESP32-S3 DevKitC-1 | 1 | Main MCU + Wi-Fi |
+| FSR 402 or FSR 406 | 4 | Pressure sensors |
+| TMP117 breakout | 1 | I²C temperature, ±0.1 °C |
+| MPU6050 breakout | 1 | I²C accelerometer + gyroscope |
+| 10 kΩ resistors | 4 | FSR voltage divider pull-downs |
+| Laptop / PC | 1 | Runs Python receiver + Streamlit |
+
+### Wiring diagram
+
+```
+ESP32-S3 pin    →  Component
+─────────────────────────────────────────────────────
+GPIO 1 (ADC1)   →  FSR1 (forefoot medial)  + 10kΩ to GND
+GPIO 2 (ADC1)   →  FSR2 (forefoot lateral) + 10kΩ to GND
+GPIO 3 (ADC1)   →  FSR3 (midfoot)          + 10kΩ to GND
+GPIO 4 (ADC1)   →  FSR4 (heel)             + 10kΩ to GND
+GPIO 8 (SDA)    →  TMP117 SDA  +  MPU6050 SDA
+GPIO 9 (SCL)    →  TMP117 SCL  +  MPU6050 SCL
+3.3 V           →  All sensor VCC
+GND             →  All sensor GND + FSR pull-down resistors
+```
+
+FSR voltage divider per sensor:
+```
+3.3V ──── FSR ──┬──── GPIO (ADC)
+                │
+              10kΩ
+                │
+               GND
+```
+
+> **I²C addresses:** TMP117 default `0x48` (ADD0→GND). MPU6050 default `0x68` (AD0→GND).
+> If both addresses conflict, change one via their address-select pins.
+
+### Step 1 — Install firmware
+
+**Required Arduino libraries** (install via Arduino Library Manager):
+
+| Library | Author | Purpose |
+|---|---|---|
+| `Adafruit MPU6050` | Adafruit | IMU driver |
+| `Adafruit BusIO` | Adafruit | I²C/SPI dependency |
+| `Adafruit Unified Sensor` | Adafruit | Sensor abstraction |
+| `SparkFun TMP117` | SparkFun | Temperature driver |
+| `ArduinoJson` | Benoit Blanchon (≥ 6.x) | JSON serialisation |
+
+**Board package:** `esp32` by Espressif ≥ 2.0.14. Board: `ESP32S3 Dev Module`.
+
+### Step 2 — Configure firmware
+
+Open `firmware/solesense_esp32s3/config.h` and set:
+
+```cpp
+#define WIFI_SSID      "YourHotspotName"
+#define WIFI_PASSWORD  "YourPassword"
+#define SERVER_IP      "192.168.x.x"   // ← your laptop IP (see below)
+#define SERVER_PORT    5005
+```
+
+All other pin and sampling settings are in the same file.
+
+### Step 3 — Find your laptop IP
+
+```powershell
+# Windows
+ipconfig
+# Look for "IPv4 Address" under your Wi-Fi adapter
+
+# Linux / macOS
+ip addr show   # or: hostname -I
+```
+
+Set `SERVER_IP` in `config.h` to that address.
+
+### Step 4 — Flash the ESP32-S3
+
+1. Open `firmware/solesense_esp32s3/solesense_esp32s3.ino` in Arduino IDE.
+2. Select **Tools → Board → ESP32S3 Dev Module**.
+3. Select the correct COM port.
+4. Click **Upload**.
+5. Open Serial Monitor at **115200 baud** to verify startup.
+
+Expected Serial output on successful boot:
+```
+╔══════════════════════════════════════════╗
+║        SOLESENSE ESP32-S3 BOOT           ║
+╚══════════════════════════════════════════╝
+[CAL] Loaded calibration from NVS
+[TMP117] OK
+[MPU6050] OK
+[WiFi] Connecting to "YourSSID"........
+[WiFi] CONNECTED
+  IP     : 192.168.x.x
+  Target : http://192.168.x.x:5005/api/sensor
+Setup complete. Starting sensor loop at 20 Hz.
+```
+
+### Step 5 — FSR calibration
+
+Hold the **BOOT button (GPIO0)** while pressing the ESP32 reset button to enter
+calibration mode. Place the insole flat on a table with no weight on it.
+
+```
+SOLESENSE FSR CALIBRATION MODE
+STEP 1: Remove all weight — waiting 1 second...
+STEP 2: Sampling baselines .................
+Calibration COMPLETE. Saved to flash.
+  FSR1 (forefoot_medial):  baseline ADC = 12
+  FSR2 (forefoot_lateral): baseline ADC = 8
+  FSR3 (midfoot):          baseline ADC = 15
+  FSR4 (heel):             baseline ADC = 10
+```
+
+Calibration is saved to flash and survives power cycles. Recalibrate whenever you
+change sensors or the physical insole assembly.
+
+Serial commands during normal operation:
+- `D` — run hardware diagnostic
+- `C` — enter calibration mode
+- `E` — erase calibration from flash
+
+### Step 6 — Start the Python receiver
+
+In a separate terminal:
+
+```powershell
+cd f:\Dataset\SoleSense
+python -m hardware.esp32_receiver
+```
+
+Expected output once ESP32 connects:
+```
+==================================================
+  SoleSense ESP32 Receiver
+  Listening on  0.0.0.0:5005
+  Endpoint      POST /api/sensor
+==================================================
+  [CONNECTED]  rate=20.0 Hz  total=847  errors=0
+```
+
+### Step 7 — Launch Streamlit and use Live Hardware mode
+
+```powershell
+cd f:\Dataset\SoleSense
+python -m streamlit run dashboard/app.py
+```
+
+1. Open `http://localhost:8501`
+2. In the sidebar, select **📡 Live Hardware**
+3. The 🟢 **CONNECTED** indicator appears as soon as packets arrive
+4. Press or flex the insole — the pressure bars and risk score update live
+
+> **Mock mode:** Enable the "🧪 Mock mode" checkbox in the sidebar to test the
+> full dashboard pipeline without any hardware connected.
+
+### Single-insole limitations
+
+This prototype has **one insole only**. The following features from the full
+two-insole design are **not active** and are set to 0.0:
+
+| Feature | Reason |
+|---|---|
+| `asym_pti_total_kpa_s` | Requires left + right insole |
+| `asym_press_mean_kpa` | Requires left + right insole |
+| `gait_symmetry_index` | Requires left + right insole |
+| `asym_load_forefoot` | Requires left + right insole |
+
+The bilateral risk rules will therefore never trigger on this prototype.
+All pressure, regional loading, gait variability, persistence, and temperature
+rules are fully active.
+
+### FSR pressure scaling note
+
+FSR ADC counts are **not clinically calibrated kPa**. The adapter applies:
+
+```
+proxy_kpa = (adc_count / 4095) × 600
+```
+
+This is a relative load proxy only. Do not interpret as absolute clinical pressure.
+To improve accuracy, perform a bench calibration against known weights and adjust
+`FSR_SCALE_KPA` in `hardware/hardware_adapter.py`.
+
+### New files added
+
+| File | Purpose |
+|---|---|
+| `firmware/solesense_esp32s3/config.h` | All firmware configuration |
+| `firmware/solesense_esp32s3/sensors.h/cpp` | FSR + TMP117 + MPU6050 drivers |
+| `firmware/solesense_esp32s3/calibration.h/cpp` | NVS FSR baseline calibration |
+| `firmware/solesense_esp32s3/wifi_tx.h/cpp` | Wi-Fi connection + HTTP POST |
+| `firmware/solesense_esp32s3/solesense_esp32s3.ino` | Main firmware sketch |
+| `hardware/sensor_schema.py` | JSON packet definition + parser |
+| `hardware/esp32_receiver.py` | Flask HTTP receiver + rolling buffer |
+| `hardware/hardware_adapter.py` | Converts packets → `compute_risk()` input |
+| `tests/test_hardware_adapter.py` | 30 tests for schema + adapter + risk integration |
+
+---
+
+## 15. Future Hardware Integration (Full Design)
 
 ### Planned SoleSense insole hardware
 
@@ -675,7 +902,7 @@ and `src/anomaly_model.py`.
 
 ---
 
-## 15. TinyML Roadmap
+## 16. TinyML Roadmap
 
 `src/anomaly_model.py` defines the API. The model is not yet trained.
 
@@ -718,7 +945,7 @@ Implement `PersonalAnomalyModel.fit()` and `.predict()` in `src/anomaly_model.py
 
 ---
 
-## 16. Configuration Reference
+## 17. Configuration Reference
 
 All constants in **one file**: `config/config.py`
 
@@ -755,7 +982,7 @@ RISK_LEVEL_ALERT            = 60
 
 ---
 
-## 17. Dataset Citation
+## 18. Dataset Citation
 
 If you use StepUP-P150 in any publication, please cite both:
 

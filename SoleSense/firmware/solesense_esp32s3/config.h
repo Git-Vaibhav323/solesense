@@ -24,18 +24,20 @@
 // ═══════════════════════════════════════════════════════════════════════════
 //  SECTION 1 — FSR Analog Input Pins
 //
+//  Currently using 2 FSRs only.
 //  Use ADC1 pins ONLY (GPIO 1–10 on ESP32-S3-DevKitC-1).
-//  ADC2 (GPIO 11–20) is shared with the Wi-Fi RF block and gives
-//  unreliable readings when Wi-Fi is active.
+//  ADC2 (GPIO 11–20) conflicts with Wi-Fi.
 //
-//  Physical FSR wiring per sensor:
+//  Physical wiring per sensor:
 //    3.3V ─── FSR ─── GPIO pin ─── 10 kΩ ─── GND
-//  (voltage divider: GPIO reads HIGH under load, LOW at rest)
 // ═══════════════════════════════════════════════════════════════════════════
-#define FSR1_PIN   1    // ADC1_CH0
-#define FSR2_PIN   2    // ADC1_CH1
-#define FSR3_PIN   3    // ADC1_CH2
-#define FSR4_PIN   4    // ADC1_CH3
+#define FSR_COUNT  2        // ← 2 active sensors
+
+#define FSR1_PIN   1        // ADC1_CH0 — ACTIVE
+#define FSR2_PIN   2        // ADC1_CH1 — ACTIVE
+// FSR3 and FSR4 are NOT connected — pins defined to avoid compile errors
+#define FSR3_PIN   3        // NOT USED
+#define FSR4_PIN   4        // NOT USED
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  SECTION 2 — FSR Anatomical Region Mapping
@@ -59,16 +61,16 @@
 //    They do NOT imply clinical pressure measurement.
 //    See Section 11 for the pressure disclaimer.
 // ═══════════════════════════════════════════════════════════════════════════
-#define FSR1_REGION  "forefoot_medial"    // metatarsal head, inner side
-#define FSR2_REGION  "forefoot_lateral"   // metatarsal head, outer side
-#define FSR3_REGION  "midfoot"            // arch / navicular area
-#define FSR4_REGION  "heel"               // calcaneus / rearfoot
+#define FSR1_REGION  "forefoot"    // FSR1 — forefoot / metatarsal
+#define FSR2_REGION  "heel"        // FSR2 — heel / rearfoot
+#define FSR3_REGION  "unused"      // NOT CONNECTED
+#define FSR4_REGION  "unused"      // NOT CONNECTED
 
-// Short labels for Serial output (keep ≤ 16 chars for column alignment)
-#define FSR1_LABEL  "Forefoot Med."
-#define FSR2_LABEL  "Forefoot Lat."
-#define FSR3_LABEL  "Midfoot      "
-#define FSR4_LABEL  "Heel         "
+// Short labels for Serial output
+#define FSR1_LABEL  "Forefoot     "
+#define FSR2_LABEL  "Heel         "
+#define FSR3_LABEL  "Unused       "
+#define FSR4_LABEL  "Unused       "
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  SECTION 3 — I²C Pins and Device Addresses

@@ -115,20 +115,22 @@ void sensors_read(SensorPacket &pkt) {
     pkt.timestamp_ms = millis();
 
     // ── FSR channels ─────────────────────────────────────────────────────────
-    // ADC1 channels only — ADC2 shares silicon with the Wi-Fi RF block and is
-    // unreliable when Wi-Fi is active.  Pins 1–4 are safe ADC1 channels on the
-    // ESP32-S3-DevKitC-1 board (confirmed against Espressif pin table).
+    // Only FSR1 and FSR2 are physically connected (FSR_COUNT = 2).
+    // FSR3 and FSR4 slots are zeroed so the JSON schema stays unchanged.
     const uint8_t fsr_pins[4] = { FSR1_PIN, FSR2_PIN, FSR3_PIN, FSR4_PIN };
     const CalibrationData &cal = calibration_get();
 
     for (int i = 0; i < 4; i++) {
-        pkt.fsr.raw[i] = (uint16_t) analogRead(fsr_pins[i]);
-
-        // Subtract zero-load baseline recorded during calibration.
-        // The cast to int32_t is intentional — raw can be less than baseline
-        // due to ADC noise; clamp the result to zero rather than wrapping.
-        int32_t corrected = (int32_t)pkt.fsr.raw[i] - (int32_t)cal.baseline[i];
-        pkt.fsr.calibrated[i] = (uint16_t) max(0L, corrected);
+        if (i < FSR_COUNT) {
+            // Active sensor — read and apply calibration baseline
+            pkt.fsr.raw[i] = (uint16_t) analogRead(fsr_pins[i]);
+            int32_t corrected = (int32_t)pkt.fsr.raw[i] - (int32_t)cal.baseline[i];
+            pkt.fsr.calibrated[i] = (uint16_t) max(0L, corrected);
+        } else {
+            // Unused channel — zero both slots
+            pkt.fsr.raw[i]        = 0;
+            pkt.fsr.calibrated[i] = 0;
+        }
     }
 
     // ── TMP117 ───────────────────────────────────────────────────────────────
@@ -184,14 +186,12 @@ void sensors_diagnostic() {
     // Output format required by TASK 3:  FSR1: <value>
     // Shows calibrated (baseline-subtracted) value.
     // Raw ADC value shown in parentheses for reference.
-    Serial.printf("FSR1: %d  (raw %d)\n",
-                  pkt.fsr.calibrated[0], pkt.fsr.raw[0]);
-    Serial.printf("FSR2: %d  (raw %d)\n",
-                  pkt.fsr.calibrated[1], pkt.fsr.raw[1]);
-    Serial.printf("FSR3: %d  (raw %d)\n",
-                  pkt.fsr.calibrated[2], pkt.fsr.raw[2]);
-    Serial.printf("FSR4: %d  (raw %d)\n",
-                  pkt.fsr.calibrated[3], pkt.fsr.raw[3]);
+    Serial.printf("FSR1: %d  (raw %d)  [%s]\n",
+                  pkt.fsr.calibrated[0], pkt.fsr.raw[0], FSR1_LABEL);
+    Serial.printf("FSR2: %d  (raw %d)  [%s]\n",
+                  pkt.fsr.calibrated[1], pkt.fsr.raw[1], FSR2_LABEL);
+    Serial.println(F("FSR3: not connected"));
+    Serial.println(F("FSR4: not connected"));
 
     // ── Temperature ──────────────────────────────────────────────────────────
     if (pkt.tmp117.ok) {

@@ -109,13 +109,14 @@ MIN_LOAD_FRACTION: float = 0.05
 # Analysis window used when converting a rolling buffer to a feature row
 DEFAULT_WINDOW_S: float = 5.0
 
-# FSR → anatomical region mapping.
-# Change this to match your physical insole assembly.
+# Number of physically connected FSRs (currently 2)
+FSR_COUNT = 2
+
+# FSR → anatomical region mapping  (only fsr1 and fsr2 are connected)
 FSR_REGION_MAP: dict[str, str] = {
-    "fsr1": "forefoot_medial",
-    "fsr2": "forefoot_lateral",
-    "fsr3": "midfoot",
-    "fsr4": "heel",
+    "fsr1": "forefoot",   # FSR1 — forefoot
+    "fsr2": "heel",       # FSR2 — heel / rearfoot
+    # fsr3 and fsr4 are not connected — always 0
 }
 
 # Bilateral features unavailable on single-insole prototype
@@ -166,8 +167,10 @@ def parse_flat_packet(raw: dict) -> dict:
         raise PacketValidationError(f"Invalid timestamp: {raw['timestamp']!r}")
 
     # ── FSR channels ──────────────────────────────────────────────────────────
+    # fsr1 and fsr2 are required (physically connected).
+    # fsr3 and fsr4 are optional — default to 0 when absent or not connected.
     fsr = {}
-    for key in ("fsr1", "fsr2", "fsr3", "fsr4"):
+    for key in ("fsr1", "fsr2"):
         if key not in raw:
             raise PacketValidationError(f"Missing required field: '{key}'")
         try:
@@ -176,7 +179,13 @@ def parse_flat_packet(raw: dict) -> dict:
             raise PacketValidationError(
                 f"Invalid value for '{key}': {raw[key]!r} — expected integer ADC count"
             )
-        fsr[key] = max(0, min(FSR_ADC_MAX, val))   # clamp to valid ADC range
+        fsr[key] = max(0, min(FSR_ADC_MAX, val))
+
+    for key in ("fsr3", "fsr4"):
+        try:
+            fsr[key] = max(0, min(FSR_ADC_MAX, int(raw.get(key, 0) or 0)))
+        except (TypeError, ValueError):
+            fsr[key] = 0   # malformed → treat as not connected
 
     # ── temperature ───────────────────────────────────────────────────────────
     temperature: Optional[float] = None
@@ -242,27 +251,21 @@ def single_packet_to_feature_row(packet: dict) -> pd.Series:
     """
     fsr1 = packet["fsr1"]
     fsr2 = packet["fsr2"]
-    fsr3 = packet["fsr3"]
-    fsr4 = packet["fsr4"]
+    # fsr3 and fsr4 not connected — always 0
+    fsr3 = 0
+    fsr4 = 0
 
-    total_adc = fsr1 + fsr2 + fsr3 + fsr4
+    total_adc = fsr1 + fsr2
     total_kpa = (total_adc / FSR_ADC_MAX) * FSR_SCALE_KPA
 
-    # Regional fractions
-    ff_adc = fsr1 + fsr2                    # forefoot
-    rf_adc = fsr4                           # rearfoot / heel
-    mf_adc = fsr3                           # midfoot
+    # Regional fractions — fsr1 = forefoot, fsr2 = heel
+    load_frac_forefoot = fsr1 / total_adc if total_adc > 0 else 0.0
+    load_frac_rearfoot = fsr2 / total_adc if total_adc > 0 else 0.0
+    load_frac_midfoot  = 0.0   # no midfoot sensor
+    load_frac_toe      = 0.0   # no toe sensor
 
-    load_frac_forefoot = ff_adc / total_adc if total_adc > 0 else 0.0
-    load_frac_rearfoot = rf_adc / total_adc if total_adc > 0 else 0.0
-    load_frac_midfoot  = mf_adc / total_adc if total_adc > 0 else 0.0
-    load_frac_toe      = max(0.0, 1.0 - load_frac_forefoot
-                                       - load_frac_rearfoot
-                                       - load_frac_midfoot)
-
-    # Proxy kPa values
-    press_max_kpa  = (max(fsr1, fsr2, fsr3, fsr4) / FSR_ADC_MAX) * FSR_SCALE_KPA
-    press_mean_kpa = total_kpa / 4.0
+    press_max_kpa  = (max(fsr1, fsr2) / FSR_ADC_MAX) * FSR_SCALE_KPA
+    press_mean_kpa = total_kpa / 2.0   # 2 active sensors
 
     # PTI proxy for a single frame
     pti_proxy = total_kpa * FRAME_DURATION_S
@@ -414,8 +417,8 @@ class HardwareInputAdapter:
 # ═════════════════════════════════════════════════════════════════════════════
 
 def _fsr_total_kpa(p: dict) -> float:
-    """Sum of all 4 FSR channels scaled to proxy kPa."""
-    total_adc = p["fsr1"] + p["fsr2"] + p["fsr3"] + p["fsr4"]
+    """Sum of active FSR channels (fsr1 + fsr2) scaled to proxy kPa."""
+    total_adc = p["fsr1"] + p["fsr2"]   # fsr3/fsr4 always 0
     return (total_adc / FSR_ADC_MAX) * FSR_SCALE_KPA
 
 
@@ -436,18 +439,18 @@ def _packets_to_feature_row(packets: list[dict]) -> pd.Series:
     # PTI proxy: sum of press × frame_duration over window
     pti_total = float(np.sum(press_arr) * FRAME_DURATION_S)
 
-    # ── Regional fractions (mean over window) ─────────────────────────────────
+    # ── Regional fractions — 2 FSR layout ────────────────────────────────────
+    # fsr1 = forefoot,  fsr2 = heel,  fsr3/fsr4 = 0 (not connected)
     def _ff_frac(p: dict) -> float:
-        total = p["fsr1"] + p["fsr2"] + p["fsr3"] + p["fsr4"]
-        return (p["fsr1"] + p["fsr2"]) / total if total > 0 else 0.0
+        total = p["fsr1"] + p["fsr2"]
+        return p["fsr1"] / total if total > 0 else 0.0
 
     def _rf_frac(p: dict) -> float:
-        total = p["fsr1"] + p["fsr2"] + p["fsr3"] + p["fsr4"]
-        return p["fsr4"] / total if total > 0 else 0.0
+        total = p["fsr1"] + p["fsr2"]
+        return p["fsr2"] / total if total > 0 else 0.0
 
     def _mf_frac(p: dict) -> float:
-        total = p["fsr1"] + p["fsr2"] + p["fsr3"] + p["fsr4"]
-        return p["fsr3"] / total if total > 0 else 0.0
+        return 0.0   # no midfoot sensor
 
     ff_arr = np.array([_ff_frac(p) for p in packets])
     rf_arr = np.array([_rf_frac(p) for p in packets])

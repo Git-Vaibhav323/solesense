@@ -1,9 +1,9 @@
 """
-SoleSense — Live FSR Viewer
+SoleSense — Live FSR Viewer  (2-sensor build)
 Polls the running receiver over HTTP. Works in any terminal.
 
 Usage:
-    Terminal 1:  python -m hardware.esp32_receiver
+    Terminal 1:  python -m streamlit run dashboard/app.py
     Terminal 2:  python watch_fsr.py
 """
 
@@ -28,7 +28,7 @@ def get(url):
 
 print()
 print("=" * 60)
-print("  SoleSense — Live FSR Viewer")
+print("  SoleSense — Live FSR Viewer  (FSR1=Forefoot  FSR2=Heel)")
 print("  Press Ctrl+C to stop")
 print("=" * 60)
 print()
@@ -44,12 +44,12 @@ for i in range(15):
 else:
     print()
     print("  ERROR: cannot reach receiver at localhost:5005")
-    print("  Run this first:  python -m hardware.esp32_receiver")
+    print("  Run this first:  python -m streamlit run dashboard/app.py")
     raise SystemExit(1)
 
 print()
-print(f"  {'FSR1':>6}  {'FSR2':>6}  {'FSR3':>6}  {'FSR4':>6}  {'TEMP':>8}  {'RATE':>7}  {'TOTAL':>7}")
-print(f"  {'-'*6}  {'-'*6}  {'-'*6}  {'-'*6}  {'-'*8}  {'-'*7}  {'-'*7}")
+print(f"  {'FOREFOOT':>10}  {'HEEL':>10}  {'TEMP':>8}  {'RATE':>7}  {'TOTAL':>7}")
+print(f"  {'-'*10}  {'-'*10}  {'-'*8}  {'-'*7}  {'-'*7}")
 
 seen = 0
 while True:
@@ -60,8 +60,7 @@ while True:
         temp = f"{pkt['temperature']:.1f}C" if pkt.get("temperature") else "N/A"
         conn = "LIVE" if pkt.get("connected") else "WAIT"
         print(
-            f"  {pkt['fsr1']:>6}  {pkt['fsr2']:>6}  "
-            f"{pkt['fsr3']:>6}  {pkt['fsr4']:>6}  "
+            f"  {pkt['fsr1']:>10}  {pkt['fsr2']:>10}  "
             f"{temp:>8}  "
             f"{pkt['rate_hz']:>5.1f}Hz  "
             f"{pkt['total']:>7}  {conn}"

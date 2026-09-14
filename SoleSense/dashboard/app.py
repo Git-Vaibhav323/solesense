@@ -1258,13 +1258,10 @@ def page_live_hardware():
                 unsafe_allow_html=True)
 
     if latest:
-        c1, c2, c3, c4, c5, c6 = st.columns(6)
+        c1, c2, c3, c4 = st.columns(4)
 
-        # latest is a plain dict from parse_flat_packet()
         fsr1 = latest.get("fsr1", 0)
         fsr2 = latest.get("fsr2", 0)
-        fsr3 = latest.get("fsr3", 0)
-        fsr4 = latest.get("fsr4", 0)
         temp = latest.get("temperature")
         ax   = latest.get("ax", 0.0)
         ay   = latest.get("ay", 0.0)
@@ -1275,14 +1272,12 @@ def page_live_hardware():
         accel_mag = (ax**2 + ay**2 + az**2) ** 0.5
 
         for col, name, val, color in [
-            (c1, "Forefoot Med.",  fsr1, C["left"]),
-            (c2, "Forefoot Lat.",  fsr2, C["left"]),
-            (c3, "Midfoot",        fsr3, C["accent"]),
-            (c4, "Heel",           fsr4, C["right"]),
-            (c5, "Temperature",
+            (c1, "Forefoot (FSR1)", fsr1, C["left"]),
+            (c2, "Heel (FSR2)",     fsr2, C["right"]),
+            (c3, "Temperature",
              f"{temp:.1f} °C" if temp is not None else "N/A",
              C["monitor"]),
-            (c6, "Accel |g|",
+            (c4, "Accel |g|",
              f"{accel_mag:.3f} g",
              C["neutral"]),
         ]:
@@ -1293,7 +1288,6 @@ def page_live_hardware():
                 unsafe_allow_html=True,
             )
 
-        # IMU row — show if any axis is non-zero
         if abs(ax) + abs(ay) + abs(az) > 0.001:
             i1, i2, i3, i4, i5, i6 = st.columns(6)
             for col, lbl, val in [
@@ -1317,17 +1311,13 @@ def page_live_hardware():
     if packets:
         import numpy as np
         fm_arr = np.array([p.get("fsr1", 0) for p in packets], dtype=float)
-        fl_arr = np.array([p.get("fsr2", 0) for p in packets], dtype=float)
-        mf_arr = np.array([p.get("fsr3", 0) for p in packets], dtype=float)
-        hl_arr = np.array([p.get("fsr4", 0) for p in packets], dtype=float)
+        hl_arr = np.array([p.get("fsr2", 0) for p in packets], dtype=float)
 
         region_means = {
-            "Forefoot Medial":  float(fm_arr.mean()),
-            "Forefoot Lateral": float(fl_arr.mean()),
-            "Midfoot":          float(mf_arr.mean()),
-            "Heel":             float(hl_arr.mean()),
+            "Forefoot (FSR1)": float(fm_arr.mean()),
+            "Heel (FSR2)":     float(hl_arr.mean()),
         }
-        region_colors = [C["left"], C["left"], C["accent"], C["right"]]
+        region_colors = [C["left"], C["right"]]
 
         fig_fsr = go.Figure(go.Bar(
             x=list(region_means.keys()),
@@ -1349,14 +1339,14 @@ def page_live_hardware():
         r2c1, r2c2 = st.columns([1, 2])
         with r2c1:
             if latest:
-                total = latest.get("fsr1",0)+latest.get("fsr2",0)+latest.get("fsr3",0)+latest.get("fsr4",0)
+                total = latest.get("fsr1",0) + latest.get("fsr2",0)
                 total = total if total > 0 else 1
                 st.plotly_chart(donut_regional(
                     left_vals=[
                         latest.get("fsr1", 0) / total * 100,
+                        0,
+                        0,
                         latest.get("fsr2", 0) / total * 100,
-                        latest.get("fsr3", 0) / total * 100,
-                        latest.get("fsr4", 0) / total * 100,
                     ],
                     right_vals=[0, 0, 0, 0],
                 ), use_container_width=True)
@@ -1364,7 +1354,7 @@ def page_live_hardware():
             st.plotly_chart(fig_fsr, use_container_width=True)
 
         # Time-series of total load
-        total_arr = fm_arr + fl_arr + mf_arr + hl_arr
+        total_arr = fm_arr + hl_arr
         t_axis    = list(range(len(total_arr)))
         fig_ts = go.Figure()
         fig_ts.add_trace(go.Scatter(

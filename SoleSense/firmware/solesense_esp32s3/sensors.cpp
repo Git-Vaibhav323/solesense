@@ -1,19 +1,19 @@
 /**
  * SoleSense ESP32-S3 Firmware
- * sensors.cpp  —  sensor driver implementation
+ * sensors.cpp — sensor driver implementation
  *
- * ─── Required Arduino libraries ────────────────────────────────────────────
- *  Library name                    Author          Install via
- *  ──────────────────────────────  ──────────────  ─────────────────────────
- *  Adafruit MPU6050                Adafruit        Arduino Library Manager
- *  Adafruit BusIO                  Adafruit        (dependency, auto-installed)
- *  Adafruit Unified Sensor         Adafruit        (dependency, auto-installed)
- *  SparkFun TMP117 Arduino Library SparkFun        Arduino Library Manager
+ * ─── Required Arduino libraries ─────────────────────────────────────────────
+ *  Library                   Author          Install via
+ *  ─────────────────────────────────────────────────────
+ *  Adafruit MPU6050          Adafruit        Library Manager
+ *  Adafruit BusIO            Adafruit        (auto-installed as dependency)
+ *  Adafruit Unified Sensor   Adafruit        (auto-installed as dependency)
+ *  OneWire                   Paul Stoffregen Library Manager
+ *  DallasTemperature         Miles Burton    Library Manager
  *
- *  Search exact names above in Library Manager → Install.
  *  Board package: "esp32" by Espressif ≥ 2.0.14
  *  Board target : ESP32S3 Dev Module
- * ───────────────────────────────────────────────────────────────────────────
+ * ────────────────────────────────────────────────────────────────────────────
  */
 
 #include "sensors.h"
@@ -23,26 +23,34 @@
 #include <Arduino.h>
 #include <Wire.h>
 
-// Adafruit MPU6050 library
+// MPU6050
 #include <Adafruit_MPU6050.h>
 #include <Adafruit_Sensor.h>
 
-// SparkFun TMP117 library
-#include <SparkFun_TMP117.h>
+// DS18B20
+#include <OneWire.h>
+#include <DallasTemperature.h>
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Module-private state
 // ─────────────────────────────────────────────────────────────────────────────
 
+// MPU6050
 static Adafruit_MPU6050 _mpu;
-static TMP117           _tmp117;
+static bool             _mpu_ok = false;
 
-static bool _tmp_ok = false;
-static bool _mpu_ok = false;
+// DS18B20
+static OneWire           _ow(DS18B20_PIN);
+static DallasTemperature _dallas(&_ow);
+static uint8_t           _ds_count = 0;
 
-// Cache last valid TMP117 reading — TMP117 updates at ~4 Hz, sensor loop runs
-// at 20 Hz, so we hold the last good value between updates.
-static float _last_temp_c = 25.0f;
+// Cached temperature values — updated whenever a conversion is ready.
+// -127.0 is the DS18B20 library's error sentinel.
+static float _last_temp[2] = { -127.0f, -127.0f };
+
+// Tracks when the last asynchronous conversion was requested
+static uint32_t _conv_requested_ms = 0;
+static bool     _conv_in_flight    = false;
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  sensors_init()
@@ -50,60 +58,59 @@ static float _last_temp_c = 25.0f;
 
 bool sensors_init() {
 
-    // ── I²C bus ──────────────────────────────────────────────────────────────
-    // SDA and SCL are defined in config.h (default GPIO 8, 9).
-    // 400 kHz fast-mode is supported by both TMP117 and MPU6050.
+    // ── I²C (MPU6050) ─────────────────────────────────────────────────────────
     Wire.begin(I2C_SDA, I2C_SCL);
     Wire.setClock(400000UL);
 
-    // ── TMP117 ───────────────────────────────────────────────────────────────
-    // SparkFun library: begin(address, wire_instance)
-    // Default I²C address with ADD0 → GND : 0x48
-    // Default I²C address with ADD0 → VCC : 0x49
-    // Change TMP117_I2C_ADDR in config.h if your breakout uses a different jumper.
-    _tmp_ok = _tmp117.begin(TMP117_I2C_ADDR, Wire);
-
-    if (_tmp_ok) {
-        // One-shot or continuous conversion mode (default is continuous, 1 Hz).
-        // For 20 Hz sensor loop the default is fine; the read function checks
-        // dataReady() and holds the previous value until a new sample arrives.
-        Serial.println(F("[TMP117] Found — temperature sensor ready"));
-    } else {
-        Serial.println(F("[TMP117] NOT FOUND — check wiring and I2C address"));
-        Serial.printf (  "         Expected address: 0x%02X  (SDA=GPIO%d  SCL=GPIO%d)\n",
-                         TMP117_I2C_ADDR, I2C_SDA, I2C_SCL);
-    }
-
-    // ── MPU6050 ──────────────────────────────────────────────────────────────
-    // Adafruit library: begin(address, wire_instance)
-    // Default I²C address with AD0 → GND : 0x68
-    // Default I²C address with AD0 → VCC : 0x69
-    // Change MPU6050_I2C_ADDR in config.h if needed.
     _mpu_ok = _mpu.begin(MPU6050_I2C_ADDR, &Wire);
-
     if (_mpu_ok) {
-        // ±4 g range balances sensitivity and headroom for gait impacts
         _mpu.setAccelerometerRange(MPU6050_RANGE_4_G);
-
-        // ±500 °/s covers normal walking angular velocities
         _mpu.setGyroRange(MPU6050_RANGE_500_DEG);
-
-        // 21 Hz DLPF removes high-frequency vibration noise while preserving
-        // gait-relevant signals (step frequency typically 1–3 Hz)
         _mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
-
-        Serial.println(F("[MPU6050] Found — IMU ready (±4g, ±500°/s, 21Hz DLPF)"));
+        Serial.println(F("[MPU6050] Found  (±4g, ±500°/s, 21Hz DLPF)"));
     } else {
-        Serial.println(F("[MPU6050] NOT FOUND — check wiring and I2C address"));
-        Serial.printf (  "          Expected address: 0x%02X  (SDA=GPIO%d  SCL=GPIO%d)\n",
-                         MPU6050_I2C_ADDR, I2C_SDA, I2C_SCL);
+        Serial.printf("[MPU6050] NOT FOUND — check SDA=GPIO%d SCL=GPIO%d addr=0x%02X\n",
+                      I2C_SDA, I2C_SCL, MPU6050_I2C_ADDR);
     }
 
-    // FSR pins are purely analog inputs.  No pinMode() call needed; the ADC
-    // is configured via analogReadResolution() and analogSetAttenuation()
-    // in the main .ino before sensors_init() is called.
+    // ── DS18B20 (1-Wire) ──────────────────────────────────────────────────────
+    _dallas.begin();
+    _ds_count = (uint8_t)_dallas.getDeviceCount();
 
-    return _tmp_ok && _mpu_ok;
+    if (_ds_count == 0) {
+        Serial.printf("[DS18B20] NOT FOUND — check GPIO%d wiring and 4.7kΩ pull-up\n",
+                      DS18B20_PIN);
+    } else {
+        Serial.printf("[DS18B20] Found %d sensor(s) on GPIO%d\n",
+                      _ds_count, DS18B20_PIN);
+
+        // Set resolution and switch to async (non-blocking) mode
+        _dallas.setResolution(DS18B20_RESOLUTION);
+        _dallas.setWaitForConversion(false);   // non-blocking reads
+
+        // Print device addresses for identification
+        for (uint8_t i = 0; i < _ds_count && i < 2; i++) {
+            DeviceAddress addr;
+            if (_dallas.getAddress(addr, i)) {
+                Serial.printf("  TEMP%d address: ", i + 1);
+                for (uint8_t b = 0; b < 8; b++) {
+                    Serial.printf("%02X", addr[b]);
+                    if (b < 7) Serial.print(':');
+                }
+                Serial.println();
+            }
+        }
+
+        // Kick off first conversion immediately
+        _dallas.requestTemperatures();
+        _conv_requested_ms = millis();
+        _conv_in_flight    = true;
+    }
+
+    // FSR pins are ADC inputs — configured via analogReadResolution()
+    // and analogSetAttenuation() in the main .ino before sensors_init().
+
+    return _mpu_ok && (_ds_count > 0);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -114,56 +121,59 @@ void sensors_read(SensorPacket &pkt) {
 
     pkt.timestamp_ms = millis();
 
-    // ── FSR channels ─────────────────────────────────────────────────────────
-    // Only FSR1 and FSR2 are physically connected (FSR_COUNT = 2).
-    // FSR3 and FSR4 slots are zeroed so the JSON schema stays unchanged.
-    const uint8_t fsr_pins[4] = { FSR1_PIN, FSR2_PIN, FSR3_PIN, FSR4_PIN };
+    // ── FSR (2 channels) ──────────────────────────────────────────────────────
+    const uint8_t fsr_pins[FSR_COUNT] = { FSR1_PIN, FSR2_PIN };
     const CalibrationData &cal = calibration_get();
 
-    for (int i = 0; i < 4; i++) {
-        if (i < FSR_COUNT) {
-            // Active sensor — read and apply calibration baseline
-            pkt.fsr.raw[i] = (uint16_t) analogRead(fsr_pins[i]);
-            int32_t corrected = (int32_t)pkt.fsr.raw[i] - (int32_t)cal.baseline[i];
-            pkt.fsr.calibrated[i] = (uint16_t) max(0L, corrected);
-        } else {
-            // Unused channel — zero both slots
-            pkt.fsr.raw[i]        = 0;
-            pkt.fsr.calibrated[i] = 0;
-        }
+    for (int i = 0; i < FSR_COUNT; i++) {
+        pkt.fsr.raw[i] = (uint16_t)analogRead(fsr_pins[i]);
+        int32_t corr   = (int32_t)pkt.fsr.raw[i] - (int32_t)cal.baseline[i];
+        pkt.fsr.calibrated[i] = (uint16_t)max(0L, corr);
     }
 
-    // ── TMP117 ───────────────────────────────────────────────────────────────
-    pkt.tmp117.ok = _tmp_ok;
+    // ── DS18B20 (non-blocking) ────────────────────────────────────────────────
+    pkt.ds18b20.sensor_count = _ds_count;
 
-    if (_tmp_ok) {
-        // dataReady() polls the EEPROM_BUSY bit — true when a new conversion
-        // result is available.  Default conversion cycle is ~1 s (1 Hz).
-        // At 20 Hz sensor loop we simply hold the previous reading.
-        if (_tmp117.dataReady()) {
-            _last_temp_c = _tmp117.readTempC();
+    if (_ds_count > 0) {
+        // Has enough time elapsed for the conversion to finish?
+        bool conv_ready = _conv_in_flight &&
+                          (millis() - _conv_requested_ms >= DS18B20_CONVERT_MS);
+
+        if (conv_ready) {
+            // Retrieve results
+            for (uint8_t i = 0; i < _ds_count && i < 2; i++) {
+                float t = _dallas.getTempCByIndex(i);
+                if (t > -120.0f) {          // -127 = error, reject
+                    _last_temp[i] = t;
+                }
+            }
+            // Immediately request the next conversion
+            _dallas.requestTemperatures();
+            _conv_requested_ms = millis();
         }
-        pkt.tmp117.temperature_c = _last_temp_c;
+
+        // Expose last good readings (held between updates)
+        pkt.ds18b20.temperature_c[0] = _last_temp[0];
+        pkt.ds18b20.temperature_c[1] = (_ds_count >= 2) ? _last_temp[1] : -127.0f;
+        pkt.ds18b20.ok = (_last_temp[0] > -120.0f);
+
     } else {
-        pkt.tmp117.temperature_c = -999.0f;   // sentinel: unavailable
+        pkt.ds18b20.temperature_c[0] = -127.0f;
+        pkt.ds18b20.temperature_c[1] = -127.0f;
+        pkt.ds18b20.ok               = false;
     }
 
-    // ── MPU6050 ──────────────────────────────────────────────────────────────
+    // ── MPU6050 ───────────────────────────────────────────────────────────────
     pkt.mpu.ok = _mpu_ok;
-
     if (_mpu_ok) {
-        sensors_event_t accel_evt, gyro_evt, temp_evt;
-        _mpu.getEvent(&accel_evt, &gyro_evt, &temp_evt);
-
-        // Adafruit library returns acceleration in m/s² → convert to g
-        pkt.mpu.ax = accel_evt.acceleration.x / 9.80665f;
-        pkt.mpu.ay = accel_evt.acceleration.y / 9.80665f;
-        pkt.mpu.az = accel_evt.acceleration.z / 9.80665f;
-
-        // Gyroscope in rad/s → convert to °/s
-        pkt.mpu.gx = gyro_evt.gyro.x * (180.0f / PI);
-        pkt.mpu.gy = gyro_evt.gyro.y * (180.0f / PI);
-        pkt.mpu.gz = gyro_evt.gyro.z * (180.0f / PI);
+        sensors_event_t a, g, t;
+        _mpu.getEvent(&a, &g, &t);
+        pkt.mpu.ax = a.acceleration.x / 9.80665f;
+        pkt.mpu.ay = a.acceleration.y / 9.80665f;
+        pkt.mpu.az = a.acceleration.z / 9.80665f;
+        pkt.mpu.gx = g.gyro.x * (180.0f / PI);
+        pkt.mpu.gy = g.gyro.y * (180.0f / PI);
+        pkt.mpu.gz = g.gyro.z * (180.0f / PI);
     } else {
         pkt.mpu.ax = pkt.mpu.ay = pkt.mpu.az = 0.0f;
         pkt.mpu.gx = pkt.mpu.gy = pkt.mpu.gz = 0.0f;
@@ -175,32 +185,41 @@ void sensors_read(SensorPacket &pkt) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 void sensors_diagnostic() {
-    // Take a fresh live reading for the diagnostic
     SensorPacket pkt;
     sensors_read(pkt);
 
     Serial.println();
     Serial.println(F("===== SOLESENSE SENSOR DIAGNOSTIC ====="));
 
-    // ── FSR ──────────────────────────────────────────────────────────────────
-    // Output format required by TASK 3:  FSR1: <value>
-    // Shows calibrated (baseline-subtracted) value.
-    // Raw ADC value shown in parentheses for reference.
+    // FSR
     Serial.printf("FSR1: %d  (raw %d)  [%s]\n",
                   pkt.fsr.calibrated[0], pkt.fsr.raw[0], FSR1_LABEL);
     Serial.printf("FSR2: %d  (raw %d)  [%s]\n",
                   pkt.fsr.calibrated[1], pkt.fsr.raw[1], FSR2_LABEL);
-    Serial.println(F("FSR3: not connected"));
-    Serial.println(F("FSR4: not connected"));
 
-    // ── Temperature ──────────────────────────────────────────────────────────
-    if (pkt.tmp117.ok) {
-        Serial.printf("TEMP: %.2f C\n", pkt.tmp117.temperature_c);
+    // DS18B20
+    if (pkt.ds18b20.ok) {
+        if (pkt.ds18b20.temperature_c[0] > -120.0f)
+            Serial.printf("TEMP1: %.2f C\n", pkt.ds18b20.temperature_c[0]);
+        else
+            Serial.println(F("TEMP1: error"));
+
+        if (pkt.ds18b20.sensor_count >= 2) {
+            if (pkt.ds18b20.temperature_c[1] > -120.0f)
+                Serial.printf("TEMP2: %.2f C\n", pkt.ds18b20.temperature_c[1]);
+            else
+                Serial.println(F("TEMP2: error"));
+        } else {
+            Serial.println(F("TEMP2: not found"));
+        }
     } else {
-        Serial.println(F("TEMP: NOT FOUND — check wiring (SDA/SCL) and I2C address"));
+        Serial.println(F("TEMP1: NOT FOUND"));
+        Serial.println(F("TEMP2: NOT FOUND"));
+        Serial.printf( "       Check GPIO%d wiring and 4.7kΩ pull-up to 3.3V\n",
+                       DS18B20_PIN);
     }
 
-    // ── IMU ───────────────────────────────────────────────────────────────────
+    // MPU6050
     if (pkt.mpu.ok) {
         Serial.printf("AX: %.4f\n", pkt.mpu.ax);
         Serial.printf("AY: %.4f\n", pkt.mpu.ay);
@@ -215,7 +234,8 @@ void sensors_diagnostic() {
         Serial.println(F("GX: NOT FOUND"));
         Serial.println(F("GY: NOT FOUND"));
         Serial.println(F("GZ: NOT FOUND"));
-        Serial.println(F("MPU6050: check wiring (SDA/SCL) and I2C address"));
+        Serial.printf( "MPU6050: check SDA=GPIO%d SCL=GPIO%d addr=0x%02X\n",
+                       I2C_SDA, I2C_SCL, MPU6050_I2C_ADDR);
     }
 
     Serial.println(F("========================================"));
@@ -223,8 +243,8 @@ void sensors_diagnostic() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Status accessors
+//  Accessors
 // ─────────────────────────────────────────────────────────────────────────────
 
-bool sensors_tmp117_ok()  { return _tmp_ok;  }
-bool sensors_mpu6050_ok() { return _mpu_ok;  }
+bool    sensors_mpu6050_ok()    { return _mpu_ok;   }
+uint8_t sensors_ds18b20_count() { return _ds_count; }

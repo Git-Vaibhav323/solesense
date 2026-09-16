@@ -1,0 +1,49 @@
+# ── Dataset files (too large for GitHub, hosted on FRDR) ──────────────────────
+FRDR_dataset_1280_download_590_202609031103/
+FRDR_dataset_1280_download_590_202609031103.zip
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# ── Virtual environments ───────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+
+# ── Jupyter ───────────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# ── Pytest / test cache ───────────────────────────────────────────────────────
+.pytest_cache/
+.cache/
+*.pytest_ini
+
+# ── Generated data & models ───────────────────────────────────────────────────
+SoleSense/data/raw/
+SoleSense/data/processed/
+SoleSense/data/features/*.csv
+SoleSense/models/*.pkl
+SoleSense/models/*.h5
+SoleSense/models/*.pt
+SoleSense/models/*.onnx
+
+# ── OS / IDE ──────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# ── Secrets ───────────────────────────────────────────────────────────────────
+.env
+*.env
+secrets.py

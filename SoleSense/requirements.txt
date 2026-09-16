@@ -1,0 +1,25 @@
+# SoleSense requirements
+# Install with:  pip install -r requirements.txt
+
+# ── Core ─────────────────────────────────────────────────────────────────────
+numpy>=1.24.0
+pandas>=1.5.0
+scipy>=1.10.0
+
+# ── Dashboard ────────────────────────────────────────────────────────────────
+streamlit>=1.30.0
+plotly>=5.18.0
+
+# ── Hardware receiver (ESP32-S3 Wi-Fi integration) ────────────────────────────
+flask>=3.0.0          # HTTP server receiving ESP32 JSON packets
+flask-cors>=4.0.0     # allows Streamlit + Flask to run on same host
+
+# ── Notebook ─────────────────────────────────────────────────────────────────
+jupyter>=1.0.0
+matplotlib>=3.7.0
+
+# ── Testing ──────────────────────────────────────────────────────────────────
+pytest>=7.4.0
+
+# ── Optional: notebook execution ─────────────────────────────────────────────
+nbformat>=5.9.0

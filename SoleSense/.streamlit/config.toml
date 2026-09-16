@@ -1,0 +1,18 @@
+[logger]
+# Suppress deprecation and info messages in the terminal
+level = "error"
+
+[browser]
+gatherUsageStats = false
+
+[server]
+headless = false
+runOnSave = true
+
+[theme]
+base = "dark"
+backgroundColor = "#0E1117"
+secondaryBackgroundColor = "#131722"
+textColor = "#E0E0E0"
+primaryColor = "#1565C0"
+font = "sans serif"

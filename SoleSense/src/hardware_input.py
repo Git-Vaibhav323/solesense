@@ -188,13 +188,24 @@ def parse_flat_packet(raw: dict) -> dict:
             fsr[key] = 0   # malformed → treat as not connected
 
     # ── temperature ───────────────────────────────────────────────────────────
+    # New schema: temperature1 + temperature2 (DS18B20 ×2)
+    # Legacy schema: temperature (single TMP117) — kept for backwards compat
     temperature: Optional[float] = None
-    raw_temp = raw.get("temperature")
+    temperature2: Optional[float] = None
+
+    raw_temp = raw.get("temperature1") or raw.get("temperature")
     if raw_temp is not None:
         try:
             temperature = float(raw_temp)
         except (TypeError, ValueError):
-            temperature = None   # malformed → unavailable, not an error
+            temperature = None
+
+    raw_temp2 = raw.get("temperature2")
+    if raw_temp2 is not None:
+        try:
+            temperature2 = float(raw_temp2)
+        except (TypeError, ValueError):
+            temperature2 = None
 
     # ── IMU ───────────────────────────────────────────────────────────────────
     imu_fields = {}
@@ -215,6 +226,7 @@ def parse_flat_packet(raw: dict) -> dict:
         "fsr3":         fsr["fsr3"],
         "fsr4":         fsr["fsr4"],
         "temperature":  temperature,
+        "temperature2": temperature2,
         "ax":           imu_fields["ax"],
         "ay":           imu_fields["ay"],
         "az":           imu_fields["az"],

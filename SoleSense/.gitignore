@@ -1,0 +1,26 @@
+# Dataset — 50 GB, never commit
+../FRDR_dataset_1280_download_590_202609031103/
+data/features/features.csv
+data/processed/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Models (trained weights)
+models/*.pkl
+models/*.h5
+models/*.tflite
+
+# Jupyter
+.ipynb_checkpoints/
+docs/figures/
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1104,1355 +1104,188 @@ def page_dataset_explorer():
             st.info(f"Feature '{fcol}' not in dataset.")
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+#  Navigation & entry point
+# ═════════════════════════════════════════════════════════════════════════════
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  PAGE 3 — Live Hardware  (ESP32-S3 Wi-Fi stream)
-#  Single LEFT-foot prototype: FSR1=forefoot, FSR2=heel, TMP117, MPU6050
-#  Anatomically correct: TOES/FOREFOOT = top, HEEL = bottom
-#  Units: ADC counts (raw), proxy-kPa (labelled), °C, g
 # ═════════════════════════════════════════════════════════════════════════════
-
-# ── Session-level baseline state (persisted across reruns) ───────────────────
-_BASELINE_KEY   = "hw_temp_baseline"
-_LOAD_HIST_KEY  = "hw_load_history"
-_RISK_HIST_KEY  = "hw_risk_history"
-_HOTSPOT_KEY    = "hw_hotspot_state"
-
-FSR_ADC_MAX_DISPLAY = 4095   # 12-bit
-# Proxy scaling — label clearly as "proxy kPa (relative)"
-_PROXY_SCALE    = 600.0   # ADC 4095 → 600 proxy-kPa
-_PROXY_LABEL    = "proxy kPa (relative, uncalibrated)"
-_PROXY_ABBR     = "p-kPa"
-
-
-def _adc_to_proxy(adc: float) -> float:
-    return (adc / FSR_ADC_MAX_DISPLAY) * _PROXY_SCALE
-
-
-def _hw_foot_svg(forefoot: float, heel: float,
-                 max_adc: float = FSR_ADC_MAX_DISPLAY) -> str:
-    """
-    Return an SVG of the anatomically correct LEFT foot outline.
-    Toes/forefoot = TOP, heel = BOTTOM.
-    One FSR dot per active sensor: FSR1 (forefoot, centred) and FSR2 (heel).
-    forefoot, heel are ADC counts (0-4095).
-    """
-    def _colour(v):
-        f = min(v / max(max_adc * 0.05, 1), 1.0)
-        if f < 0.3:   return "#43A047", 0.55 + f * 1.2
-        elif f < 0.6: return "#FB8C00", 0.65 + f * 0.8
-        else:         return "#E53935", 0.75 + f * 0.5
-
-    def _dot(cx, cy, val):
-        col, op = _colour(val)
-        r = 14 + int(val / max_adc * 22)
-        pct = int(val / max_adc * 100)
-        return (
-            f'<circle cx="{cx}" cy="{cy}" r="{r}" fill="{col}" '
-            f'opacity="{op:.2f}" stroke="white" stroke-width="1.5"/>'
-            f'<text x="{cx}" y="{cy+4}" text-anchor="middle" '
-            f'fill="white" font-size="11" font-weight="bold">{pct}%</text>'
-        )
-
-    foot_path = (
-        "M 80 10 "
-        "C 100 8, 118 18, 122 35 "
-        "C 128 55, 130 75, 128 95 "
-        "C 126 115, 124 135, 120 155 "
-        "C 116 175, 114 195, 116 215 "
-        "C 118 235, 112 258, 100 272 "
-        "C 88 285, 70 290, 58 285 "
-        "C 44 278, 36 260, 38 240 "
-        "C 40 218, 42 198, 44 178 "
-        "C 46 158, 44 138, 40 118 "
-        "C 36 98, 30 78, 34 55 "
-        "C 38 30, 54 14, 80 10 Z"
-    )
-
-    dots_html = ""
-    # Single forefoot sensor (FSR1) — centred in the forefoot zone
-    dots_html += _dot(80, 78, forefoot)
-    # Midfoot — not connected
-    dots_html += (
-        '<circle cx="80" cy="162" r="12" fill="#2A3050" opacity="0.7" '
-        'stroke="#444" stroke-width="1" stroke-dasharray="3,2"/>'
-        '<text x="80" y="166" text-anchor="middle" fill="#555" '
-        'font-size="9">N/C</text>'
-    )
-    # Single heel sensor (FSR2)
-    dots_html += _dot(80, 260, heel)
-
-    labels = (
-        f'<text x="80" y="48" text-anchor="middle" fill="#90CAF9" '
-        f'font-size="10" font-weight="600" letter-spacing="1">FOREFOOT</text>'
-        f'<text x="80" y="158" text-anchor="middle" fill="#607D8B" '
-        f'font-size="10" letter-spacing="1">MIDFOOT</text>'
-        f'<text x="80" y="298" text-anchor="middle" fill="#90CAF9" '
-        f'font-size="10" font-weight="600" letter-spacing="1">HEEL</text>'
-    )
-
-    return f"""
-<svg viewBox="0 0 160 310" xmlns="http://www.w3.org/2000/svg"
-     style="width:100%;max-width:180px;display:block;margin:auto">
-  <path d="{foot_path}" fill="#0D1B2A" stroke="#1565C0" stroke-width="2.5"/>
-  <line x1="34" y1="120" x2="128" y2="118" stroke="#1e2d44" stroke-width="1" stroke-dasharray="4,3"/>
-  <line x1="38" y1="200" x2="122" y2="198" stroke="#1e2d44" stroke-width="1" stroke-dasharray="4,3"/>
-  {dots_html}
-  {labels}
-  <circle cx="12" cy="292" r="5" fill="#43A047"/>
-  <text x="20" y="296" fill="#888" font-size="8">Low</text>
-  <circle cx="48" cy="292" r="5" fill="#FB8C00"/>
-  <text x="56" y="296" fill="#888" font-size="8">Mid</text>
-  <circle cx="82" cy="292" r="5" fill="#E53935"/>
-  <text x="90" y="296" fill="#888" font-size="8">High</text>
-</svg>"""
-
-
-def _hw_load_bar(label: str, frac: float, color: str,
-                 connected: bool = True) -> str:
-    """Horizontal load bar HTML for regional distribution."""
-    pct   = frac * 100
-    bar_w = int(frac * 100)
-    if not connected:
-        return (
-            f'<div style="margin:6px 0">'
-            f'<div style="display:flex;justify-content:space-between;'
-            f'font-size:0.78rem;color:#555;margin-bottom:3px">'
-            f'<span>{label}</span><span style="color:#444">N/C</span></div>'
-            f'<div style="background:#1A1F2E;border-radius:4px;height:10px">'
-            f'<div style="width:0%;background:#333;height:100%;border-radius:4px"></div>'
-            f'</div></div>'
-        )
-    return (
-        f'<div style="margin:6px 0">'
-        f'<div style="display:flex;justify-content:space-between;'
-        f'font-size:0.82rem;color:#ccc;margin-bottom:3px">'
-        f'<span>{label}</span>'
-        f'<span style="color:{color};font-weight:700">{pct:.1f}%</span></div>'
-        f'<div style="background:#1A1F2E;border-radius:4px;height:12px">'
-        f'<div style="width:{bar_w}%;background:{color};height:100%;'
-        f'border-radius:4px;transition:width 0.4s ease"></div>'
-        f'</div></div>'
-    )
-
-
-def _hw_metric_card(label: str, value: str, sub: str = "",
-                    color: str = "#E0E0E0", border: str = "#2A3050",
-                    icon: str = "") -> str:
-    return (
-        f'<div style="background:#0D1B2A;border:1px solid {border};'
-        f'border-radius:10px;padding:12px 16px;margin:4px 0;min-height:72px">'
-        f'<div style="color:#90CAF9;font-size:0.68rem;text-transform:uppercase;'
-        f'letter-spacing:1.2px;margin-bottom:4px">{icon} {label}</div>'
-        f'<div style="font-size:1.45rem;font-weight:700;color:{color};'
-        f'line-height:1.2">{value}</div>'
-        f'{"<div style=color:#888;font-size:0.75rem;margin-top:2px>" + sub + "</div>" if sub else ""}'
-        f'</div>'
-    )
-
-
-def _activity_class(accel_mag: float, gyro_mag: float,
-                    cadence: float) -> tuple:
-    """Classify activity from IMU data. Returns (label, icon, color)."""
-    if accel_mag < 0.05 and gyro_mag < 2.0:
-        return "STANDING / STATIC",  "🧍", "#607D8B"
-    elif cadence > 80:
-        return "RUNNING",            "🏃", "#E53935"
-    elif cadence > 40:
-        return "WALKING",            "🚶", "#43A047"
-    elif accel_mag > 0.3:
-        return "ACTIVE / DYNAMIC",   "⚡", "#FB8C00"
-    else:
-        return "LOW ACTIVITY",       "💤", "#78909C"
-
 
 def page_live_hardware():
     """
-    Live ESP32-S3 single LEFT-foot sensor dashboard.
-    Anatomically correct: FOREFOOT/TOES = top, HEEL = bottom.
-    Sensors: FSR1 (forefoot), FSR2 (heel), TMP117 (temperature), MPU6050 (IMU).
-    Units: ADC counts (raw), proxy-kPa (labelled, uncalibrated), degC, g.
-    No bilateral / left-vs-right charts -- single insole prototype.
+    Live ESP32-S3 sensor dashboard.
+    Starts the Flask receiver once (singleton) and auto-refreshes every 2 s.
     """
-    import time as _time
-    import math as _math
-
-    _header("Live Hardware &nbsp;|&nbsp; LEFT Foot &middot; ESP32-S3 &middot; FSR + TMP117 + MPU6050")
+    _header("Live Hardware &nbsp;|&nbsp; ESP32-S3 · FSR + TMP117 + MPU6050")
 
     # ── lazy imports ──────────────────────────────────────────────────────────
     try:
-        from hardware.esp32_receiver   import get_receiver
-        from hardware.hardware_adapter import HardwareAdapter
-        from src.hardware_input        import FSR_REGION_MAP, make_mock_packet
+        from hardware.esp32_receiver import get_receiver
+        from src.hardware_input      import make_mock_packet
+        from src.health_analysis     import HealthAnalysisEngine, render_health_analysis
     except ImportError as e:
-        st.error(
-            f"Hardware modules not found: {e}\n\n"
-            "Make sure you are running from the `SoleSense/` directory and the "
-            "`hardware/` folder exists."
-        )
+        st.error(f"Module not found: {e}\n\nRun from `f:/Dataset/SoleSense`.")
         return
-
-    # ── session state init ────────────────────────────────────────────────────
-    if _BASELINE_KEY  not in st.session_state: st.session_state[_BASELINE_KEY]  = None
-    if _LOAD_HIST_KEY not in st.session_state: st.session_state[_LOAD_HIST_KEY] = []
-    if _RISK_HIST_KEY not in st.session_state: st.session_state[_RISK_HIST_KEY] = []
-    if _HOTSPOT_KEY   not in st.session_state:
-        st.session_state[_HOTSPOT_KEY] = {"region": None, "since": None, "duration": 0.0}
 
     # ── sidebar ───────────────────────────────────────────────────────────────
     with st.sidebar:
-        st.markdown(
-            '<div style="background:#0D1B2A;border:1px solid #1565C0;'
-            'border-radius:8px;padding:12px 14px;margin-bottom:12px">'
-            '<span style="color:#42A5F5;font-size:0.9rem;font-weight:700">'
-            '🔌 Hardware Settings</span></div>',
-            unsafe_allow_html=True,
-        )
+        st.markdown("## 🔌 Hardware Settings")
+        st.markdown("---")
         receiver_port = st.number_input("Receiver Port", value=5005,
                                         min_value=1024, max_value=65535,
                                         step=1, key="hw_port")
-        window_s  = st.slider("Analysis window (s)", 1.0, 10.0, 5.0, 0.5, key="hw_win")
-        refresh_s = st.slider("Dashboard refresh (s)", 1, 10, 2, 1, key="hw_ref")
-        mock_mode = st.checkbox("🧪 Mock mode (no hardware)", value=False, key="hw_mock")
-
-        st.divider()
-        if st.button("📐 Set Temp Baseline (current reading)", key="hw_set_bl"):
-            st.session_state[_BASELINE_KEY] = None  # force re-capture next cycle
-
-        st.divider()
-        st.markdown(
-            '<div style="color:#90CAF9;font-size:0.8rem">'
-            '<b>Setup:</b><br>'
-            '1. Set <code>SERVER_IP</code> in <code>firmware/config.h</code><br>'
-            '2. Flash ESP32-S3<br>'
-            '3. Power the insole<br>'
-            '4. Data appears below ↓</div>',
-            unsafe_allow_html=True,
-        )
+        window_s = st.slider("Analysis window (s)", 1.0, 10.0, 5.0, 0.5,
+                             key="hw_win")
+        refresh_s = st.slider("Dashboard refresh (s)", 1, 10, 2, 1,
+                              key="hw_ref")
+        mock_mode = st.checkbox("🧪 Mock mode (no hardware)", value=False,
+                                key="hw_mock")
         st.markdown(
             '<div class="disc">⚠ EXPERIMENTAL — Not for clinical use.</div>',
             unsafe_allow_html=True,
         )
+        st.markdown("---")
+        st.markdown(
+            "**Setup:**\n"
+            "1. Set `SERVER_IP` in `firmware/config.h`\n"
+            "2. Flash ESP32-S3\n"
+            "3. Power insole\n"
+            "4. Data appears below ↓"
+        )
 
     # ── start receiver ────────────────────────────────────────────────────────
     receiver = get_receiver(host="0.0.0.0", port=int(receiver_port))
-    adapter  = HardwareAdapter(window_s=window_s)
 
-    # ── build or mock packet stream ───────────────────────────────────────────
+    # ── how-to banner ─────────────────────────────────────────────────────────
+    if not mock_mode:
+        import socket
+        try:
+            laptop_ip = socket.gethostbyname(socket.gethostname())
+        except Exception:
+            laptop_ip = "run: ipconfig (Windows) / ip addr (Linux)"
+
+        st.markdown(
+            f'<div style="background:#0D1B2A;border:1px solid #1565C0;'
+            f'border-radius:10px;padding:12px 18px;margin-bottom:14px;">'
+            f'<b style="color:#42A5F5">📡 Receiver active</b> &nbsp;'
+            f'<span style="color:#90CAF9;font-size:0.88rem">'
+            f'Listening on port <b>{int(receiver_port)}</b> &nbsp;|&nbsp; '
+            f'Set <code>SERVER_IP = "{laptop_ip}"</code> in firmware config.h'
+            f'</span></div>',
+            unsafe_allow_html=True,
+        )
+
+    # ── get data ──────────────────────────────────────────────────────────────
     if mock_mode:
+        import time
         import random
-        base_t   = int(_time.time() * 1000)
-        t_now    = _time.time()
-        packets  = []
+        from src.hardware_input import make_mock_packet
+        base_t = int(time.time() * 1000)
+        packets = []
         for i in range(int(window_s * 20)):
-            phase   = (i / max(window_s * 20, 1)) * 2 * _math.pi * 3
-            ff_base = 420 + int(180 * abs(_math.sin(phase)))
-            hl_base = 380 + int(200 * abs(_math.cos(phase)))
-            packets.append(make_mock_packet(
-                timestamp   = base_t + i * 50,
-                fsr1        = max(0, min(4095, ff_base + random.randint(-30, 30))),
-                fsr2        = max(0, min(4095, hl_base + random.randint(-30, 30))),
-                fsr3        = 0,
-                fsr4        = 0,
-                temperature = 31.4 + random.uniform(-0.05, 0.05),
-                ax          = 0.03 + 0.1 * _math.sin(phase),
-                ay          = -0.02 + 0.08 * _math.cos(phase),
-                az          = 0.98,
-                gx          = 1.2 * _math.sin(phase * 0.7),
-                gy          = -0.8 * _math.cos(phase * 0.5),
-                gz          = 0.3,
-                received_at = t_now - (window_s - i * (window_s / max(window_s * 20, 1))),
-            ))
-        status = {
-            "connected": True, "packet_rate_hz": 20.0,
-            "total_received": len(packets), "total_errors": 0,
-            "buffer_size": len(packets), "last_received_s": 0.0,
-        }
+            p = make_mock_packet(
+                timestamp=base_t + i * 50,
+                fsr1=max(0, 420 + random.randint(-40, 80)),
+                fsr2=max(0, 380 + random.randint(-30, 60)),
+                fsr3=max(0, 210 + random.randint(-20, 40)),
+                fsr4=max(0, 510 + random.randint(-50, 90)),
+                temperature=31.4,
+                received_at=time.time() - (window_s - i * 0.05),
+            )
+            packets.append(p)
+        status = {"connected": True, "packet_rate_hz": 20.0,
+                  "total_received": len(packets), "total_errors": 0,
+                  "buffer_size": len(packets), "last_received_s": 0.0,
+                  "last_esp32_t_ms": base_t, "last_temp_c": 31.4}
         latest = packets[-1] if packets else None
     else:
         packets = receiver.recent_packets(n=int(window_s * 20))
         status  = receiver.status()
         latest  = receiver.latest_packet()
 
+    # ── connection status bar ─────────────────────────────────────────────────
     conn      = status["connected"]
     conn_col  = C["normal"] if conn else C["alert"]
-    rate_hz   = status.get("packet_rate_hz", 0.0)
-    total_rx  = status.get("total_received", 0)
-    last_s    = status.get("last_received_s", None)
-    last_str  = f"{last_s:.1f} s ago" if last_s is not None else "—"
-
-    import socket as _socket
-    try:
-        laptop_ip = _socket.gethostbyname(_socket.gethostname())
-    except Exception:
-        laptop_ip = "check: ipconfig (Win) / ifconfig (Mac/Linux)"
-
-    # ═══════════════════════════════════════════════════════════════════════════
-    #  DEVICE / Wi-Fi STATUS STRIP
-    # ═══════════════════════════════════════════════════════════════════════════
     conn_dot  = "🟢" if conn else "🔴"
-    conn_text = "CONNECTED" if conn else "WAITING FOR ESP32-S3…"
-
-    has_temp = latest is not None and latest.get("temperature") is not None
-    has_imu  = latest is not None and (
-        abs(latest.get("ax", 0)) + abs(latest.get("ay", 0)) + abs(latest.get("az", 0)) > 0.001
-    )
-    fsr1_ok  = latest is not None and latest.get("fsr1", 0) > 0
-    fsr2_ok  = latest is not None and latest.get("fsr2", 0) > 0
-
-    def _sensor_badge(label, ok):
-        col = "#43A047" if ok else "#444"
-        dot = "●" if ok else "○"
-        return (f'<span style="color:{col};font-size:0.78rem;margin-right:12px">'
-                f'{dot} {label}</span>')
+    conn_text = "CONNECTED" if conn else "WAITING FOR ESP32..."
+    rate_text = f"{status['packet_rate_hz']:.1f} Hz" if conn else "—"
+    last_s    = (f"{status['last_received_s']:.1f} s ago"
+                 if status.get("last_received_s") is not None else "—")
 
     st.markdown(
-        f'<div style="background:#0A1628;border:1px solid {conn_col};'
-        f'border-radius:10px;padding:10px 18px;margin-bottom:14px;'
-        f'display:flex;align-items:center;flex-wrap:wrap;gap:8px;">'
-        f'<span style="font-size:1.3rem">{conn_dot}</span>'
-        f'<span style="color:{conn_col};font-weight:800;font-size:1rem;margin-right:16px">'
+        f'<div style="background:#0D1B2A;border:2px solid {conn_col};'
+        f'border-radius:10px;padding:12px 20px;margin-bottom:16px;'
+        f'display:flex;align-items:center;gap:24px;">'
+        f'<span style="font-size:1.5rem">{conn_dot}</span>'
+        f'<span style="color:{conn_col};font-weight:800;font-size:1.1rem">'
         f'{conn_text}</span>'
-        + _sensor_badge("FSR1 (Forefoot)", fsr1_ok)
-        + _sensor_badge("FSR2 (Heel)",     fsr2_ok)
-        + _sensor_badge("TMP117 (Temp)",   has_temp)
-        + _sensor_badge("MPU6050 (IMU)",   has_imu)
-        + f'<span style="margin-left:auto;color:#607D8B;font-size:0.8rem">'
-        f'Port <b style="color:#90CAF9">{int(receiver_port)}</b> &nbsp;|&nbsp; '
-        f'Rate <b style="color:#90CAF9">{rate_hz:.1f} Hz</b> &nbsp;|&nbsp; '
-        f'Rx <b style="color:#90CAF9">{total_rx:,}</b> &nbsp;|&nbsp; '
-        f'Last <b style="color:#90CAF9">{last_str}</b>'
+        f'<span style="color:#888;font-size:0.85rem;margin-left:auto">'
+        f'Rate: <b style="color:#90CAF9">{rate_text}</b> &nbsp;|&nbsp; '
+        f'Received: <b style="color:#90CAF9">{status["total_received"]}</b> &nbsp;|&nbsp; '
+        f'Last: <b style="color:#90CAF9">{last_s}</b>'
         f'</span></div>',
         unsafe_allow_html=True,
     )
 
     if mock_mode:
-        st.info("🧪 **Mock mode** — synthetic data for demonstration. "
-                "Uncheck to connect real ESP32-S3 hardware.")
+        st.info("🧪 **Mock mode** — showing synthetic sensor data. "
+                "Disable to use real ESP32 hardware.")
 
     if not conn and not mock_mode:
         st.markdown(
-            f'<div style="background:#0D1B2A;border:1px solid #1565C0;'
-            f'border-radius:10px;padding:14px 20px;margin-bottom:12px">'
-            f'<b style="color:#42A5F5">📡 Waiting for ESP32-S3</b><br>'
-            f'<span style="color:#90CAF9;font-size:0.88rem">'
-            f'Receiver on port <b>{int(receiver_port)}</b> — '
-            f'set <code>SERVER_IP = "{laptop_ip}"</code> in firmware '
-            f'<code>config.h</code> and power the insole.</span></div>',
+            '<div class="sh">Waiting for ESP32-S3</div>',
             unsafe_allow_html=True,
         )
         st.markdown("""
-**Setup checklist:**
-1. Flash `firmware/solesense_esp32s3/` to your ESP32-S3
-2. Edit `config.h` — set `WIFI_SSID`, `WIFI_PASSWORD`, and `SERVER_IP`
-3. Power the insole — it streams at 20 Hz automatically
-4. This page auto-refreshes
-""")
-        _time.sleep(int(refresh_s))
+**Checklist:**
+1. Flash the firmware from `firmware/solesense_esp32s3/`
+2. Set `WIFI_SSID` / `WIFI_PASSWORD` / `SERVER_IP` in `config.h`
+3. Power the ESP32-S3 — it connects automatically
+4. This page auto-refreshes every few seconds
+        """)
+        # auto-rerun so page keeps checking
+        import time
+        time.sleep(int(refresh_s))
         st.rerun()
         return
 
-    # ── unpack latest packet ───────────────────────────────────────────────────
+    # ── health engine — persistent across refreshes ───────────────────────────
+    if "health_engine" not in st.session_state:
+        st.session_state["health_engine"] = HealthAnalysisEngine()
+    engine = st.session_state["health_engine"]
+
+    # ── raw sensor snapshot bar ───────────────────────────────────────────────
+    st.markdown('<div class="sh">📡 Live Sensor Readings</div>',
+                unsafe_allow_html=True)
     if latest:
-        fsr1_adc = int(latest.get("fsr1", 0))
-        fsr2_adc = int(latest.get("fsr2", 0))
-        temp_c   = latest.get("temperature")
-        ax_now   = latest.get("ax", 0.0)
-        ay_now   = latest.get("ay", 0.0)
-        az_now   = latest.get("az", 0.0)
-        gx_now   = latest.get("gx", 0.0)
-        gy_now   = latest.get("gy", 0.0)
-        gz_now   = latest.get("gz", 0.0)
-    else:
-        fsr1_adc = fsr2_adc = 0
-        temp_c   = None
-        ax_now = ay_now = az_now = 0.0
-        gx_now = gy_now = gz_now = 0.0
-
-    total_adc     = fsr1_adc + fsr2_adc
-    ff_frac       = fsr1_adc / total_adc if total_adc > 0 else 0.0
-    hl_frac       = fsr2_adc / total_adc if total_adc > 0 else 0.0
-    accel_mag_now = _math.sqrt(ax_now**2 + ay_now**2 + az_now**2)
-    gyro_mag_now  = _math.sqrt(gx_now**2 + gy_now**2 + gz_now**2)
-
-    # ── window-level arrays ────────────────────────────────────────────────────
-    ff_arr    = np.array([p.get("fsr1", 0) for p in packets], dtype=float)
-    hl_arr    = np.array([p.get("fsr2", 0) for p in packets], dtype=float)
-    total_arr = ff_arr + hl_arr
-    n_pkt     = len(packets)
-
-    ff_mean_adc  = float(ff_arr.mean())   if n_pkt else 0.0
-    hl_mean_adc  = float(hl_arr.mean())   if n_pkt else 0.0
-    tot_mean_adc = float(total_arr.mean()) if n_pkt else 0.0
-    tot_peak_adc = float(total_arr.max())  if n_pkt else 0.0
-
-    ff_mean_pkpa  = _adc_to_proxy(ff_mean_adc)
-    hl_mean_pkpa  = _adc_to_proxy(hl_mean_adc)
-    tot_mean_pkpa = _adc_to_proxy(tot_mean_adc)
-    tot_peak_pkpa = _adc_to_proxy(tot_peak_adc)
-    cur_tot_pkpa  = _adc_to_proxy(float(total_adc))
-
-    frame_dur = 1.0 / 20.0
-    pti_ff    = float(np.sum(ff_arr))    * frame_dur * (_PROXY_SCALE / FSR_ADC_MAX_DISPLAY)
-    pti_hl    = float(np.sum(hl_arr))    * frame_dur * (_PROXY_SCALE / FSR_ADC_MAX_DISPLAY)
-    pti_total = float(np.sum(total_arr)) * frame_dur * (_PROXY_SCALE / FSR_ADC_MAX_DISPLAY)
-
-    persist_thr = FSR_ADC_MAX_DISPLAY * 0.30
-    pers_ff     = float(np.mean(ff_arr    > persist_thr)) if n_pkt else 0.0
-    pers_hl     = float(np.mean(hl_arr    > persist_thr)) if n_pkt else 0.0
-    pers_total  = float(np.mean(total_arr > persist_thr * 2)) if n_pkt else 0.0
-
-    if n_pkt > 0:
-        st.session_state[_LOAD_HIST_KEY].append(tot_mean_adc)
-        if len(st.session_state[_LOAD_HIST_KEY]) > 2000:
-            st.session_state[_LOAD_HIST_KEY] = st.session_state[_LOAD_HIST_KEY][-2000:]
-
-    # ── feature row for risk engine ────────────────────────────────────────────
-    feature_row = adapter.to_feature_row(packets) if n_pkt >= 2 else None
-    if feature_row is not None:
-        rr = compute_risk(feature_row)
-        st.session_state[_RISK_HIST_KEY].append(rr.risk_score)
-        if len(st.session_state[_RISK_HIST_KEY]) > 500:
-            st.session_state[_RISK_HIST_KEY] = st.session_state[_RISK_HIST_KEY][-500:]
-    else:
-        rr = None
-
-    # ── hotspot state ──────────────────────────────────────────────────────────
-    hs    = st.session_state[_HOTSPOT_KEY]
-    now_t = _time.time()
-    if ff_frac > 0.6:
-        dominant_region = "Forefoot"
-        hs_reason       = f"Forefoot carries {ff_frac*100:.0f}% of total load"
-    elif hl_frac > 0.6:
-        dominant_region = "Heel"
-        hs_reason       = f"Heel carries {hl_frac*100:.0f}% of total load"
-    elif tot_peak_adc > FSR_ADC_MAX_DISPLAY * 0.7:
-        dominant_region = "Peak load zone"
-        hs_reason       = f"Peak load {tot_peak_adc:.0f} ADC ({tot_peak_pkpa:.0f} {_PROXY_ABBR})"
-    else:
-        dominant_region = None
-        hs_reason       = "Load within normal distribution"
-
-    if dominant_region and dominant_region == hs.get("region"):
-        hs["duration"] = now_t - (hs.get("since") or now_t)
-    else:
-        hs["region"]   = dominant_region
-        hs["since"]    = now_t
-        hs["duration"] = 0.0
-
-    # ═══════════════════════════════════════════════════════════════════════════
-    #  OVERALL STATUS BANNER
-    # ═══════════════════════════════════════════════════════════════════════════
-    lc        = LEVEL_COLOR[rr.risk_level] if rr else C["neutral"]
-    lvl       = rr.risk_level              if rr else "COLLECTING…"
-    lvl_icon  = LEVEL_EMOJI.get(lvl, "⏳")
-    n_factors = len(rr.contributing_factors) if rr else 0
-    risk_score = rr.risk_score if rr else 0.0
-    led_col   = {"NORMAL": "#43A047", "MONITOR": "#FB8C00",
-                 "ALERT": "#E53935"}.get(lvl, "#607D8B")
-
-    st.markdown(
-        f'<div style="background:linear-gradient(135deg,{led_col}22 0%,#0A1628 60%);'
-        f'border:2px solid {lc};border-radius:14px;padding:18px 24px;'
-        f'margin-bottom:18px;display:flex;align-items:center;gap:20px;flex-wrap:wrap">'
-        f'<div style="width:22px;height:22px;border-radius:50%;background:{led_col};'
-        f'box-shadow:0 0 12px {led_col};flex-shrink:0"></div>'
-        f'<div style="flex:1">'
-        f'<div style="color:{lc};font-size:1.8rem;font-weight:900;'
-        f'letter-spacing:2px;line-height:1">{lvl_icon} {lvl}</div>'
-        f'<div style="color:#90CAF9;font-size:0.88rem;margin-top:4px">'
-        f'SoleSense Risk Indicator: '
-        f'<b style="color:{lc};font-size:1.2rem">{risk_score:.1f}</b>/100 &nbsp;·&nbsp; '
-        f'{n_factors} factor{"s" if n_factors != 1 else ""} active &nbsp;·&nbsp; '
-        f'LEFT foot · single-insole prototype</div>'
-        f'</div>'
-        f'<div style="text-align:center;background:#0D1B2A;border-radius:10px;'
-        f'padding:10px 20px;border:1px solid {lc}">'
-        f'<div style="font-size:2.2rem;font-weight:900;color:{lc}">{risk_score:.0f}</div>'
-        f'<div style="color:#888;font-size:0.72rem">/ 100</div>'
-        f'</div></div>',
-        unsafe_allow_html=True,
-    )
-
-    # ═══════════════════════════════════════════════════════════════════════════
-    #  SECTION 1 — Foot Map, Load Distribution, Top Metrics
-    # ═══════════════════════════════════════════════════════════════════════════
-    st.markdown('<div class="sh">① Left Foot Pressure Map &amp; Load Distribution</div>',
-                unsafe_allow_html=True)
-
-    col_foot, col_load, col_metrics = st.columns([1, 1.4, 1.6])
-
-    with col_foot:
-        st.markdown(
-            '<div style="background:#0A1628;border:1px solid #1e2d44;'
-            'border-radius:12px;padding:14px;text-align:center">'
-            '<div style="color:#90CAF9;font-size:0.72rem;text-transform:uppercase;'
-            'letter-spacing:1.5px;margin-bottom:8px">LEFT FOOT</div>'
-            + _hw_foot_svg(forefoot=fsr1_adc, heel=fsr2_adc)
-            + '<div style="color:#607D8B;font-size:0.7rem;margin-top:8px">'
-            'Dot size ∝ relative load<br>Colour: green→amber→red</div>'
-            '</div>',
-            unsafe_allow_html=True,
-        )
-
-    with col_load:
-        st.markdown(
-            '<div style="background:#0A1628;border:1px solid #1e2d44;'
-            'border-radius:12px;padding:16px 18px">'
-            '<div style="color:#90CAF9;font-size:0.72rem;text-transform:uppercase;'
-            'letter-spacing:1.5px;margin-bottom:12px">LOAD DISTRIBUTION</div>'
-            + _hw_load_bar("🦶 Forefoot (FSR1)", ff_frac, "#1E88E5", connected=True)
-            + _hw_load_bar("⚙ Midfoot",          0.0,     "#607D8B", connected=False)
-            + _hw_load_bar("👟 Heel (FSR2)",      hl_frac, "#42A5F5", connected=True)
-            + f'<div style="border-top:1px solid #1e2d44;margin-top:12px;'
-            f'padding-top:10px">'
-            f'<div style="color:#607D8B;font-size:0.72rem">⚙ Midfoot sensor not connected (N/C)</div>'
-            f'<div style="color:#607D8B;font-size:0.72rem;margin-top:2px">'
-            f'FSR1 ADC: <b style="color:#90CAF9">{fsr1_adc}</b> &nbsp;|&nbsp; '
-            f'FSR2 ADC: <b style="color:#90CAF9">{fsr2_adc}</b> &nbsp;|&nbsp; '
-            f'Total: <b style="color:#90CAF9">{total_adc}</b></div>'
-            f'</div></div>',
-            unsafe_allow_html=True,
-        )
-
-    with col_metrics:
-        m1, m2 = st.columns(2)
-        cadence_est = feature_row.get("cadence_steps_per_min", 0.0) if feature_row is not None else 0.0
-        stance_est  = feature_row.get("stance_time_s", 0.0)         if feature_row is not None else 0.0
-        with m1:
-            st.markdown(
-                _hw_metric_card("Peak Load", f"{tot_peak_pkpa:.0f}",
-                                sub=_PROXY_LABEL, color="#42A5F5",
-                                border="#1565C0", icon="📈")
-                + _hw_metric_card("Avg Load", f"{tot_mean_pkpa:.0f}",
-                                  sub=_PROXY_LABEL, color="#90CAF9",
-                                  border="#2A3050", icon="📊")
-                + _hw_metric_card("Current", f"{cur_tot_pkpa:.0f}",
-                                  sub=_PROXY_LABEL, color=C["accent"],
-                                  border="#2A3050", icon="⚡"),
-                unsafe_allow_html=True,
-            )
-        with m2:
-            st.markdown(
-                _hw_metric_card("Forefoot Avg", f"{ff_mean_pkpa:.0f}",
-                                sub=f"{_PROXY_ABBR} · FSR1", color="#1E88E5",
-                                border="#1565C0", icon="🦶")
-                + _hw_metric_card("Heel Avg", f"{hl_mean_pkpa:.0f}",
-                                  sub=f"{_PROXY_ABBR} · FSR2", color="#42A5F5",
-                                  border="#2A3050", icon="👟")
-                + _hw_metric_card("Cadence (est.)", f"{cadence_est:.0f}",
-                                  sub="steps/min (load-onset)", color="#90CAF9",
-                                  border="#2A3050", icon="🚶"),
-                unsafe_allow_html=True,
-            )
-
-    # ═══════════════════════════════════════════════════════════════════════════
-    #  SECTION 2 — Load Over Time
-    # ═══════════════════════════════════════════════════════════════════════════
-    st.markdown('<div class="sh">② Pressure / Load Over Time</div>',
-                unsafe_allow_html=True)
-
-    if n_pkt > 1:
-        t_axis   = [i * frame_dur for i in range(n_pkt)]
-        ff_pkpa  = [_adc_to_proxy(v) for v in ff_arr]
-        hl_pkpa  = [_adc_to_proxy(v) for v in hl_arr]
-        tot_pkpa = [_adc_to_proxy(v) for v in total_arr]
-
-        fig_ts = go.Figure()
-        fig_ts.add_trace(go.Scatter(
-            x=t_axis, y=ff_pkpa, mode="lines", name="Forefoot (FSR1)",
-            line=dict(color="#1E88E5", width=2, shape="spline"),
-            hovertemplate="t=%{x:.2f}s<br>Forefoot: %{y:.0f} p-kPa<extra></extra>",
-        ))
-        fig_ts.add_trace(go.Scatter(
-            x=t_axis, y=hl_pkpa, mode="lines", name="Heel (FSR2)",
-            line=dict(color="#42A5F5", width=2, shape="spline"),
-            hovertemplate="t=%{x:.2f}s<br>Heel: %{y:.0f} p-kPa<extra></extra>",
-        ))
-        fig_ts.add_trace(go.Scatter(
-            x=t_axis, y=tot_pkpa, mode="lines", name="Total",
-            fill="tozeroy", fillcolor="rgba(0,176,255,0.08)",
-            line=dict(color=C["accent"], width=2.5, shape="spline"),
-            hovertemplate="t=%{x:.2f}s<br>Total: %{y:.0f} p-kPa<extra></extra>",
-        ))
-        thr_pkpa = _PROXY_SCALE * 0.30
-        fig_ts.add_hline(
-            y=thr_pkpa, line_dash="dash", line_color=C["monitor"],
-            annotation_text="Elevated threshold (30% scale)",
-            annotation_font_color=C["monitor"], annotation_position="right",
-        )
-        _chart_layout(fig_ts, height=260,
-                      title=dict(
-                          text=f"Load Over Time — last {window_s:.0f}s window  "
-                               f"<span style='font-size:11px;color:#607D8B'>"
-                               f"(proxy kPa = ADC/4095 × 600, uncalibrated)</span>",
-                          font=dict(size=13)),
-                      margin=(44, 35, 50, 80))
-        fig_ts.update_layout(
-            yaxis_title=f"Load ({_PROXY_ABBR})",
-            xaxis_title="Time (s)",
-            legend=dict(orientation="h", y=-0.22, font=dict(size=11)),
-        )
-        st.plotly_chart(fig_ts, use_container_width=True)
-    else:
-        st.info("Collecting samples…")
-
-    # ═══════════════════════════════════════════════════════════════════════════
-    #  SECTION 3 — Pressure-Time Exposure & Persistence
-    # ═══════════════════════════════════════════════════════════════════════════
-    st.markdown('<div class="sh">③ Pressure-Time Exposure &amp; Persistence</div>',
-                unsafe_allow_html=True)
-
-    pe1, pe2, pe3, pe4, pe5, pe6 = st.columns(6)
-    pti_col  = C["alert"] if pti_total > _PROXY_SCALE * 0.5 * window_s else C["normal"]
-    def pers_col(p):
-        return C["alert"] if p > 0.7 else (C["monitor"] if p > 0.4 else C["normal"])
-
-    pe1.markdown(_hw_metric_card("Forefoot PTI", f"{pti_ff:.1f}",
-                                 sub="p-kPa·s (proxy)", color="#1E88E5",
-                                 border="#1565C0", icon="🦶"),
-                 unsafe_allow_html=True)
-    pe2.markdown(_hw_metric_card("Heel PTI", f"{pti_hl:.1f}",
-                                 sub="p-kPa·s (proxy)", color="#42A5F5",
-                                 border="#2A3050", icon="👟"),
-                 unsafe_allow_html=True)
-    pe3.markdown(_hw_metric_card("Total PTI", f"{pti_total:.1f}",
-                                 sub="p-kPa·s (proxy)", color=pti_col,
-                                 border="#2A3050", icon="Σ"),
-                 unsafe_allow_html=True)
-    pe4.markdown(_hw_metric_card("Forefoot Persist.", f"{pers_ff*100:.0f}%",
-                                 sub="% samples elevated", color=pers_col(pers_ff),
-                                 border="#2A3050", icon="⏱"),
-                 unsafe_allow_html=True)
-    pe5.markdown(_hw_metric_card("Heel Persist.", f"{pers_hl*100:.0f}%",
-                                 sub="% samples elevated", color=pers_col(pers_hl),
-                                 border="#2A3050", icon="⏱"),
-                 unsafe_allow_html=True)
-    pe6.markdown(_hw_metric_card("Overall Persist.", f"{pers_total*100:.0f}%",
-                                 sub="% samples elevated", color=pers_col(pers_total),
-                                 border="#2A3050", icon="📊"),
-                 unsafe_allow_html=True)
-
-    reg_fig = go.Figure()
-    reg_fig.add_trace(go.Bar(
-        x=["Forefoot (FSR1)", "Midfoot (N/C)", "Heel (FSR2)"],
-        y=[ff_mean_pkpa, 0.0, hl_mean_pkpa],
-        marker_color=["#1E88E5", "#2A3050", "#42A5F5"],
-        marker_line_color=["#42A5F5", "#333", "#90CAF9"],
-        marker_line_width=1.5,
-        text=[f"{ff_mean_pkpa:.0f}", "N/C", f"{hl_mean_pkpa:.0f}"],
-        textposition="outside", cliponaxis=False,
-        hovertemplate="%{x}<br>%{y:.1f} p-kPa<extra></extra>",
-        name="Avg Load",
-    ))
-    reg_fig.add_trace(go.Bar(
-        x=["Forefoot (FSR1)", "Midfoot (N/C)", "Heel (FSR2)"],
-        y=[pers_ff * 100, 0.0, pers_hl * 100],
-        marker_color=["rgba(30,136,229,0.35)", "rgba(0,0,0,0)", "rgba(66,165,245,0.35)"],
-        marker_line_width=0,
-        name="Persistence %",
-        yaxis="y2",
-        hovertemplate="%{x}<br>Persistence: %{y:.0f}%<extra></extra>",
-    ))
-    _chart_layout(reg_fig, height=260,
-                  title=dict(text="Window Average Load by Region  (bars = p-kPa, overlay = persistence %)",
-                             font=dict(size=12)),
-                  margin=(44, 35, 60, 20))
-    reg_fig.update_layout(
-        barmode="overlay",
-        yaxis=dict(title=f"Avg Load ({_PROXY_ABBR})", gridcolor="#1e2330"),
-        yaxis2=dict(title="Persistence %", overlaying="y", side="right",
-                    range=[0, 110], gridcolor="#1e2330", showgrid=False),
-        showlegend=False,
-        annotations=[dict(
-            text="⚠ Proxy values — not calibrated kPa", x=0.5, y=-0.18,
-            xref="paper", yref="paper", showarrow=False,
-            font=dict(size=10, color="#607D8B"), align="center",
-        )],
-    )
-    st.plotly_chart(reg_fig, use_container_width=True)
-
-    # ═══════════════════════════════════════════════════════════════════════════
-    #  SECTION 4 — Temperature
-    # ═══════════════════════════════════════════════════════════════════════════
-    st.markdown('<div class="sh">④ Temperature (TMP117)</div>',
-                unsafe_allow_html=True)
-
-    temp_pkts = [p for p in packets if p.get("temperature") is not None]
-    temp_vals = [p["temperature"] for p in temp_pkts]
-
-    if temp_vals:
-        t_cur  = temp_c if temp_c is not None else temp_vals[-1]
-        t_mean = float(np.mean(temp_vals))
-        t_std  = float(np.std(temp_vals)) if len(temp_vals) > 1 else 0.0
-
-        if st.session_state[_BASELINE_KEY] is None:
-            st.session_state[_BASELINE_KEY] = round(t_mean, 2)
-        baseline  = st.session_state[_BASELINE_KEY]
-        deviation = t_cur - baseline
-
-        dev_col   = (C["alert"] if abs(deviation) > 1.5 else
-                     C["monitor"] if abs(deviation) > 0.5 else C["normal"])
-        trend_dir = "▲" if deviation > 0.1 else ("▼" if deviation < -0.1 else "→")
-        trend_col = C["alert"] if deviation > 1.0 else (
-                    C["monitor"] if deviation > 0.3 else C["normal"])
-
-        tc1, tc2, tc3, tc4 = st.columns(4)
-        tc1.markdown(_hw_metric_card("Current Temp", f"{t_cur:.2f} °C",
-                                     sub="TMP117 reading", color=C["monitor"],
-                                     border="#E65100", icon="🌡️"),
-                     unsafe_allow_html=True)
-        tc2.markdown(_hw_metric_card("Session Baseline", f"{baseline:.2f} °C",
-                                     sub="set at session start", color="#90CAF9",
-                                     border="#2A3050", icon="📐"),
-                     unsafe_allow_html=True)
-        tc3.markdown(_hw_metric_card("Deviation", f"{deviation:+.2f} °C",
-                                     sub="current − baseline", color=dev_col,
-                                     border="#2A3050", icon="Δ"),
-                     unsafe_allow_html=True)
-        tc4.markdown(_hw_metric_card("Trend", f"{trend_dir} {abs(deviation):.2f} °C",
-                                     sub=f"σ = {t_std:.3f} °C (window)",
-                                     color=trend_col, border="#2A3050", icon="📈"),
-                     unsafe_allow_html=True)
-
-        if len(temp_vals) > 2:
-            fig_temp = go.Figure()
-            t_t_axis = [i * frame_dur for i in range(len(temp_vals))]
-            fig_temp.add_hrect(y0=baseline - 0.5, y1=baseline + 0.5,
-                               fillcolor="rgba(67,160,71,0.07)", line_width=0)
-            fig_temp.add_trace(go.Scatter(
-                x=t_t_axis, y=temp_vals, mode="lines+markers",
-                line=dict(color=C["monitor"], width=2.5, shape="spline"),
-                marker=dict(size=3),
-                fill="tozeroy", fillcolor="rgba(251,140,0,0.08)",
-                hovertemplate="t=%{x:.2f}s<br>Temp: %{y:.3f} °C<extra></extra>",
-                name="Temperature",
-            ))
-            fig_temp.add_hline(
-                y=baseline, line_dash="dot", line_color="#43A047",
-                annotation_text=f"Baseline {baseline:.2f} °C",
-                annotation_font_color="#43A047", annotation_position="right",
-            )
-            _chart_layout(fig_temp, height=200,
-                          title=dict(text="Temperature Over Window (°C) — TMP117",
-                                     font=dict(size=13)),
-                          margin=(40, 35, 50, 80))
-            fig_temp.update_layout(yaxis_title="Temperature (°C)",
-                                   xaxis_title="Time (s)")
-            st.plotly_chart(fig_temp, use_container_width=True)
-    else:
-        st.markdown(
-            '<div style="background:#1A1F2E;border:1px solid #2A3050;'
-            'border-radius:10px;padding:18px;color:#607D8B">'
-            '🌡️ TMP117 not reporting — check wiring and firmware config.</div>',
-            unsafe_allow_html=True,
-        )
-
-    # ═══════════════════════════════════════════════════════════════════════════
-    #  SECTION 5 — Gait Analysis (LEFT FOOT · MPU6050)
-    # ═══════════════════════════════════════════════════════════════════════════
-    st.markdown('<div class="sh">⑤ Gait Analysis — LEFT FOOT (MPU6050)</div>',
-                unsafe_allow_html=True)
-
-    imu_pkts = [p for p in packets
-                if abs(p.get("ax", 0)) + abs(p.get("ay", 0)) + abs(p.get("az", 0)) > 0.001]
-
-    if imu_pkts:
-        # ── raw IMU arrays ────────────────────────────────────────────────────
-        ax_v = np.array([p.get("ax", 0.0) for p in imu_pkts])
-        ay_v = np.array([p.get("ay", 0.0) for p in imu_pkts])
-        az_v = np.array([p.get("az", 0.0) for p in imu_pkts])
-        gx_v = np.array([p.get("gx", 0.0) for p in imu_pkts])
-        gy_v = np.array([p.get("gy", 0.0) for p in imu_pkts])
-        gz_v = np.array([p.get("gz", 0.0) for p in imu_pkts])
-        am_v = np.sqrt(ax_v**2 + ay_v**2 + az_v**2)   # total accel magnitude
-        gm_v = np.sqrt(gx_v**2 + gy_v**2 + gz_v**2)   # total gyro magnitude
-
-        # ── derived scalars ────────────────────────────────────────────────────
-        accel_mean     = float(am_v.mean())
-        accel_std      = float(am_v.std())
-        accel_peak     = float(am_v.max())
-        gyro_mean      = float(gm_v.mean())
-        # deviation from gravity baseline (1 g when stationary)
-        dynamic_accel  = float(np.mean(np.abs(am_v - 1.0)))
-
-        cadence_est_imu = (feature_row.get("cadence_steps_per_min", 0.0)
-                           if feature_row is not None else 0.0)
-        stance_est_imu  = (feature_row.get("stance_time_s", 0.0)
-                           if feature_row is not None else 0.0)
-        step_time_std   = (feature_row.get("step_time_std_s", 0.0)
-                           if feature_row is not None else 0.0)
-
-        # ── step count estimate from FSR load-onset events (this window) ────────
-        step_count_est = max(0, int(round(cadence_est_imu * (window_s / 60.0))))
-
-        # ── session total step counter (accumulates across all refreshes) ────────
-        _STEP_TOTAL_KEY    = "hw_total_steps"
-        _STEP_LAST_WIN_KEY = "hw_last_window_steps"
-        if _STEP_TOTAL_KEY    not in st.session_state: st.session_state[_STEP_TOTAL_KEY]    = 0
-        if _STEP_LAST_WIN_KEY not in st.session_state: st.session_state[_STEP_LAST_WIN_KEY] = 0
-        # Only add newly detected steps (avoid counting the same window twice)
-        new_steps = max(0, step_count_est - st.session_state[_STEP_LAST_WIN_KEY])
-        st.session_state[_STEP_TOTAL_KEY]    += new_steps
-        st.session_state[_STEP_LAST_WIN_KEY]  = step_count_est
-        session_total_steps = st.session_state[_STEP_TOTAL_KEY]
-
-        # ── movement intensity (0–100 normalised from dynamic accel) ──────────
-        # 0 = completely static (|A-1g|=0), 100 = very high motion (|A-1g|>1g)
-        movement_intensity = min(100.0, dynamic_accel * 100.0)
-
-        # ── gait variability (coefficient of variation of |A|) ─────────────────
-        gait_cv = (accel_std / accel_mean * 100.0) if accel_mean > 0 else 0.0
-
-        # ── activity classification ────────────────────────────────────────────
-        act_label, act_icon, act_col = _activity_class(
-            dynamic_accel, gyro_mean, cadence_est_imu)
-
-        # ── gait session baseline (accel magnitude history) ───────────────────
-        _GAIT_HIST_KEY = "hw_gait_accel_hist"
-        if _GAIT_HIST_KEY not in st.session_state:
-            st.session_state[_GAIT_HIST_KEY] = []
-        st.session_state[_GAIT_HIST_KEY].append(float(accel_mean))
-        if len(st.session_state[_GAIT_HIST_KEY]) > 600:
-            st.session_state[_GAIT_HIST_KEY] = st.session_state[_GAIT_HIST_KEY][-600:]
-
-        gait_hist = st.session_state[_GAIT_HIST_KEY]
-        gait_baseline_val = float(np.mean(gait_hist[:min(20, len(gait_hist))]))
-        gait_current_val  = float(np.mean(gait_hist[-min(10, len(gait_hist)):]))
-        gait_deviation    = ((gait_current_val - gait_baseline_val)
-                             / max(gait_baseline_val, 0.001) * 100.0)
-
-        # ── gait trend (STABLE / CHANGING / DEVIATING) ────────────────────────
-        if abs(gait_deviation) < 5.0:
-            gait_trend       = "STABLE"
-            gait_trend_icon  = "→"
-            gait_trend_color = "#43A047"
-        elif abs(gait_deviation) < 15.0:
-            gait_trend       = "CHANGING"
-            gait_trend_icon  = "⤴" if gait_deviation > 0 else "⤵"
-            gait_trend_color = "#FB8C00"
-        else:
-            gait_trend       = "DEVIATING"
-            gait_trend_icon  = "▲" if gait_deviation > 0 else "▼"
-            gait_trend_color = "#E53935"
-
-        # ── GAIT ANALYSIS interpretation card ─────────────────────────────────
-        if act_label in ("STANDING / STATIC", "LOW ACTIVITY"):
-            gait_card_level  = "NORMAL"
-            gait_card_color  = "#43A047"
-            gait_card_dot    = "🟢"
-            gait_card_text   = (
-                "Foot is at rest. No significant movement detected. "
-                "Place foot on the ground and walk to see gait analysis."
-            )
-        elif gait_trend == "STABLE" and gait_cv < 15.0:
-            gait_card_level  = "NORMAL"
-            gait_card_color  = "#43A047"
-            gait_card_dot    = "🟢"
-            gait_card_text   = (
-                f"Movement pattern is consistent with the current session baseline. "
-                f"Cadence is {cadence_est_imu:.0f} steps/min with stable rhythm "
-                f"(variability CV = {gait_cv:.1f}%)."
-            )
-        elif gait_trend == "CHANGING" or 15.0 <= gait_cv < 30.0:
-            gait_card_level  = "MONITOR"
-            gait_card_color  = "#FB8C00"
-            gait_card_dot    = "🟡"
-            gait_card_text   = (
-                f"Movement pattern shows a moderate deviation from the session baseline "
-                f"({gait_deviation:+.1f}%). Gait rhythm has some irregularity "
-                f"(CV = {gait_cv:.1f}%). Continue monitoring over the next few minutes."
-            )
-        else:
-            gait_card_level  = "MONITOR"
-            gait_card_color  = "#E53935"
-            gait_card_dot    = "🔴"
-            gait_card_text   = (
-                f"Movement pattern is notably different from the session baseline "
-                f"({gait_deviation:+.1f}%). High gait variability detected "
-                f"(CV = {gait_cv:.1f}%). Check for fatigue, discomfort, or altered gait."
-            )
-
-        # Reliability note for cadence
-        cadence_reliable = step_count_est >= 2 and cadence_est_imu > 0
-
-        # ══════════════════════════════════════════════════════════════════════
-        #  ROW A — GAIT ANALYSIS card + Activity + Trend
-        # ══════════════════════════════════════════════════════════════════════
-        ga_card_col, ga_meta_col = st.columns([1.6, 1])
-
-        with ga_card_col:
-            st.markdown(
-                f'<div style="background:linear-gradient(135deg,{gait_card_color}18 0%,'
-                f'#0A1628 70%);border:2px solid {gait_card_color};border-radius:14px;'
-                f'padding:18px 22px;height:100%">'
-                f'<div style="font-size:0.68rem;text-transform:uppercase;'
-                f'letter-spacing:1.8px;color:#90CAF9;margin-bottom:6px">'
-                f'GAIT ANALYSIS CARD — LEFT FOOT</div>'
-                f'<div style="font-size:1.55rem;font-weight:900;color:{gait_card_color};'
-                f'letter-spacing:1px;margin-bottom:8px">'
-                f'{gait_card_dot} {gait_card_level}</div>'
-                f'<div style="color:#D0D8F0;font-size:0.9rem;line-height:1.55">'
-                f'{gait_card_text}</div>'
-                f'<div style="margin-top:12px;display:flex;gap:12px;flex-wrap:wrap">'
-                f'<span style="background:#0D1B2A;border:1px solid {act_col};'
-                f'border-radius:20px;padding:3px 12px;color:{act_col};'
-                f'font-size:0.78rem;font-weight:700">{act_icon} {act_label}</span>'
-                f'<span style="background:#0D1B2A;border:1px solid {gait_trend_color};'
-                f'border-radius:20px;padding:3px 12px;color:{gait_trend_color};'
-                f'font-size:0.78rem;font-weight:700">'
-                f'{gait_trend_icon} Trend: {gait_trend}</span>'
-                f'</div></div>',
-                unsafe_allow_html=True,
-            )
-
-        with ga_meta_col:
-            st.markdown(
-                _hw_metric_card("Total Steps (session)",
-                                f"{session_total_steps:,}",
-                                sub=f"this window: ~{step_count_est} · load-onset detection",
-                                color="#42A5F5", border="#1565C0", icon="👣")
-                + _hw_metric_card("Cadence",
-                                  f"{cadence_est_imu:.0f} spm" if cadence_reliable else "< 2 steps",
-                                  sub="steps/min · load-onset detection",
-                                  color="#64B5F6" if cadence_reliable else "#607D8B",
-                                  border="#2A3050", icon="🚶")
-                + _hw_metric_card("Gait vs Baseline",
-                                  f"{gait_deviation:+.1f}%",
-                                  sub="current vs session start",
-                                  color=gait_trend_color, border="#2A3050", icon="📐"),
-                unsafe_allow_html=True,
-            )
-
-        st.markdown("")   # vertical spacer
-
-        # ══════════════════════════════════════════════════════════════════════
-        #  ROW B — Key gait metrics (5 cards)
-        # ══════════════════════════════════════════════════════════════════════
-        mb1, mb2, mb3, mb4, mb5 = st.columns(5)
-
-        mb1.markdown(
-            _hw_metric_card("|Accel| mean", f"{accel_mean:.3f} g",
-                            sub="total magnitude · MPU6050",
-                            color="#42A5F5", border="#1565C0", icon="📡"),
-            unsafe_allow_html=True,
-        )
-        mb2.markdown(
-            _hw_metric_card("Dynamic Accel", f"{dynamic_accel:.3f} g",
-                            sub="deviation from 1 g gravity",
-                            color="#64B5F6", border="#2A3050", icon="⚡"),
-            unsafe_allow_html=True,
-        )
-        intensity_col = (C["alert"] if movement_intensity > 60
-                         else C["monitor"] if movement_intensity > 30
-                         else C["normal"])
-        mb3.markdown(
-            _hw_metric_card("Movement Intensity", f"{movement_intensity:.0f} / 100",
-                            sub="0 = still · 100 = very active",
-                            color=intensity_col, border="#2A3050", icon="💪"),
-            unsafe_allow_html=True,
-        )
-        gait_cv_col = (C["alert"] if gait_cv > 30
-                       else C["monitor"] if gait_cv > 15
-                       else C["normal"])
-        mb4.markdown(
-            _hw_metric_card("Gait Variability CV", f"{gait_cv:.1f}%",
-                            sub="CV of |accel| · lower = steadier",
-                            color=gait_cv_col, border="#2A3050", icon="〰️"),
-            unsafe_allow_html=True,
-        )
-        mb5.markdown(
-            _hw_metric_card("Stance Time (est.)", f"{stance_est_imu:.2f} s" if stance_est_imu > 0 else "—",
-                            sub="mean weight-bearing per step",
-                            color="#90CAF9", border="#2A3050", icon="⏱"),
-            unsafe_allow_html=True,
-        )
-
-        # ══════════════════════════════════════════════════════════════════════
-        #  ROW C — Step timing card (only when reliably calculable)
-        # ══════════════════════════════════════════════════════════════════════
-        if cadence_reliable and step_time_std > 0:
-            step_time_mean_s = 60.0 / cadence_est_imu if cadence_est_imu > 0 else 0.0
-            stride_time_s    = step_time_mean_s * 2.0   # stride = 2 steps
-            st.markdown(
-                f'<div style="background:#0A1628;border:1px solid #1e2d44;'
-                f'border-radius:10px;padding:12px 18px;margin-bottom:8px;'
-                f'display:flex;gap:20px;flex-wrap:wrap;align-items:center">'
-                f'<div style="color:#90CAF9;font-size:0.68rem;text-transform:uppercase;'
-                f'letter-spacing:1.5px;white-space:nowrap">Step / Stride Timing</div>'
-                f'<div style="color:#42A5F5;font-size:0.88rem">'
-                f'Step time: <b>{step_time_mean_s:.2f} s</b></div>'
-                f'<div style="color:#64B5F6;font-size:0.88rem">'
-                f'Stride time (est.): <b>{stride_time_s:.2f} s</b></div>'
-                f'<div style="color:#90CAF9;font-size:0.88rem">'
-                f'Step-time std: <b>{step_time_std:.3f} s</b></div>'
-                f'<div style="color:{"#FB8C00" if step_time_std > 0.15 else "#43A047"};'
-                f'font-size:0.88rem">'
-                f'Variability: <b>{"HIGH ⚠" if step_time_std > 0.15 else "NORMAL ✓"}</b></div>'
-                f'<div style="color:#607D8B;font-size:0.75rem;margin-left:auto">'
-                f'Derived from FSR load-onset · single foot only</div>'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
-
-        # ══════════════════════════════════════════════════════════════════════
-        #  ROW D — Acceleration chart (all axes + magnitude) — EXISTING, improved
-        # ══════════════════════════════════════════════════════════════════════
-        t_imu_axis = [i * frame_dur for i in range(len(imu_pkts))]
-
-        fig_imu = go.Figure()
-        # background zone for gravity reference band
-        fig_imu.add_hrect(y0=0.9, y1=1.1,
-                          fillcolor="rgba(67,160,71,0.06)", line_width=0,
-                          annotation_text="gravity band ±0.1 g",
-                          annotation_font_color="#2E7D32",
-                          annotation_font_size=9,
-                          annotation_position="top right")
-        for vals, name, color, width, dash in [
-            (ax_v, "AX — forward/back (g)",  "#42A5F5", 1.4, "solid"),
-            (ay_v, "AY — side/side (g)",     "#66BB6A", 1.4, "solid"),
-            (az_v, "AZ — up/down (g)",       "#FFA726", 1.4, "solid"),
-            (am_v, "|A| — total magnitude (g)", "#FFFFFF", 2.8, "solid"),
+        fsr1 = latest.get("fsr1", 0)
+        fsr2 = latest.get("fsr2", 0)
+        t1   = latest.get("temperature")
+        ax   = latest.get("ax", 0.0)
+        ay   = latest.get("ay", 0.0)
+        az   = latest.get("az", 0.0)
+        amag = (ax**2 + ay**2 + az**2) ** 0.5
+        sc1, sc2, sc3, sc4 = st.columns(4)
+        for col, name, val, color in [
+            (sc1, "Forefoot (FSR1)", fsr1,                              C["left"]),
+            (sc2, "Heel (FSR2)",     fsr2,                              C["right"]),
+            (sc3, "Temperature",     f"{t1:.1f} C" if t1 else "N/A",   C["monitor"]),
+            (sc4, "Accel |g|",       f"{amag:.3f} g",                   C["neutral"]),
         ]:
-            fig_imu.add_trace(go.Scatter(
-                x=t_imu_axis, y=vals.tolist(), mode="lines", name=name,
-                line=dict(color=color, width=width, shape="spline", dash=dash),
-                hovertemplate=(
-                    "Time: %{x:.2f} s<br>"
-                    + name.split(" ")[0] + ": %{y:.4f} g<br>"
-                    "<i>(%{y:.4f} × 9.81 = " + "</i><extra></extra>"
-                ),
-            ))
-        fig_imu.add_hline(y=1.0, line_dash="dot", line_color="#2E7D32",
-                          line_width=1.5,
-                          annotation_text="1 g  (gravity when stationary)",
-                          annotation_font_color="#4CAF50",
-                          annotation_font_size=10,
-                          annotation_position="right")
-        fig_imu.add_hline(y=0.0, line_dash="dot", line_color="#37474F",
-                          line_width=1)
-        _chart_layout(fig_imu, height=270,
-                      title=dict(
-                          text="Foot Acceleration — LEFT FOOT  "
-                               "<span style='font-size:11px;color:#607D8B'>"
-                               "MPU6050 · units: g  (1 g = 9.81 m/s²) · "
-                               "stationary foot ≈ |A| = 1 g</span>",
-                          font=dict(size=13)),
-                      margin=(50, 45, 55, 90))
-        fig_imu.update_layout(
-            yaxis=dict(title="Acceleration (g)", gridcolor="#1e2330",
-                       zeroline=False),
-            xaxis=dict(title="Time (s)", gridcolor="#1e2330"),
-            legend=dict(orientation="h", y=-0.28, font=dict(size=11),
-                        bgcolor="rgba(0,0,0,0)"),
-        )
-        st.plotly_chart(fig_imu, use_container_width=True)
-
-        # ══════════════════════════════════════════════════════════════════════
-        #  ROW E — Angular velocity chart — EXISTING, improved
-        # ══════════════════════════════════════════════════════════════════════
-        fig_gyro = go.Figure()
-        for vals, name, color, width in [
-            (gx_v, "GX — roll rate (°/s)",  "#42A5F5", 1.4),
-            (gy_v, "GY — pitch rate (°/s)", "#66BB6A", 1.4),
-            (gz_v, "GZ — yaw rate (°/s)",   "#FFA726", 1.4),
-            (gm_v, "|G| — total rate (°/s)","#FFFFFF", 2.6),
-        ]:
-            fig_gyro.add_trace(go.Scatter(
-                x=t_imu_axis, y=vals.tolist(), mode="lines", name=name,
-                line=dict(color=color, width=width, shape="spline"),
-                hovertemplate=(
-                    "Time: %{x:.2f} s<br>"
-                    + name.split(" ")[0] + ": %{y:.3f} °/s<extra></extra>"
-                ),
-            ))
-        fig_gyro.add_hline(y=0.0, line_dash="dot", line_color="#37474F",
-                           line_width=1)
-        _chart_layout(fig_gyro, height=240,
-                      title=dict(
-                          text="Foot Rotation Rate — LEFT FOOT  "
-                               "<span style='font-size:11px;color:#607D8B'>"
-                               "MPU6050 · units: °/s · "
-                               "zero = no rotation</span>",
-                          font=dict(size=13)),
-                      margin=(50, 45, 55, 90))
-        fig_gyro.update_layout(
-            yaxis=dict(title="Angular velocity (°/s)", gridcolor="#1e2330",
-                       zeroline=False),
-            xaxis=dict(title="Time (s)", gridcolor="#1e2330"),
-            legend=dict(orientation="h", y=-0.28, font=dict(size=11),
-                        bgcolor="rgba(0,0,0,0)"),
-        )
-        st.plotly_chart(fig_gyro, use_container_width=True)
-
-        # ══════════════════════════════════════════════════════════════════════
-        #  ROW F — Movement intensity sparkline (new — vs session baseline)
-        # ══════════════════════════════════════════════════════════════════════
-        if len(gait_hist) > 4:
-            gh_x = list(range(len(gait_hist)))
-            fig_gh = go.Figure()
-            fig_gh.add_hrect(y0=0.95, y1=1.05,
-                             fillcolor="rgba(67,160,71,0.07)", line_width=0)
-            fig_gh.add_hline(
-                y=gait_baseline_val, line_dash="dot", line_color="#43A047",
-                line_width=1.5,
-                annotation_text=f"Baseline {gait_baseline_val:.3f} g",
-                annotation_font_color="#4CAF50",
-                annotation_font_size=10,
-                annotation_position="right",
-            )
-            fig_gh.add_trace(go.Scatter(
-                x=gh_x, y=gait_hist,
-                mode="lines", fill="tozeroy",
-                fillcolor="rgba(66,165,245,0.08)",
-                line=dict(color="#42A5F5", width=2.0, shape="spline"),
-                hovertemplate="Reading %{x}<br>|Accel| mean: %{y:.4f} g<extra></extra>",
-                name="|Accel| mean",
-            ))
-            _chart_layout(fig_gh, height=190,
-                          title=dict(
-                              text="Movement Intensity — Session History  "
-                                   "<span style='font-size:11px;color:#607D8B'>"
-                                   "mean |A| per window · baseline = session start</span>",
-                              font=dict(size=12)),
-                          margin=(44, 38, 55, 90))
-            fig_gh.update_layout(
-                yaxis=dict(title="|Accel| mean (g)", gridcolor="#1e2330"),
-                xaxis=dict(title="Window #", gridcolor="#1e2330"),
-                showlegend=False,
-            )
-            st.plotly_chart(fig_gh, use_container_width=True)
-
-    else:
-        st.markdown(
-            '<div style="background:#1A1F2E;border:1px solid #2A3050;'
-            'border-radius:10px;padding:20px;color:#607D8B;font-size:0.9rem">'
-            '📡 <b>MPU6050 IMU not reporting data.</b><br>'
-            '<span style="font-size:0.82rem">Check wiring (SDA→GPIO8, SCL→GPIO9) '
-            'and firmware config. I²C address: 0x68 (AD0→GND).</span>'
-            '</div>',
-            unsafe_allow_html=True,
-        )
-
-
-    # ═══════════════════════════════════════════════════════════════════════════
-    #  SECTION 6 — Regional Hotspot
-    # ═══════════════════════════════════════════════════════════════════════════
-    st.markdown('<div class="sh">⑥ Regional Hotspot</div>',
-                unsafe_allow_html=True)
-
-    hs_region   = hs.get("region")
-    hs_duration = hs.get("duration", 0.0)
-
-    if hs_region:
-        hs_col     = C["alert"] if hs_duration > 10 else C["monitor"]
-        hs_dur_s   = f"{hs_duration:.0f} s"
-        hs_dur_lbl = " ⚠️ prolonged" if hs_duration > 10 else ""
-        st.markdown(
-            f'<div style="background:#0D1B2A;border:1px solid {hs_col};'
-            f'border-radius:12px;padding:16px 20px;margin-bottom:12px">'
-            f'<div style="color:{hs_col};font-size:1.1rem;font-weight:800">'
-            f'🔥 Hotspot: {hs_region}{hs_dur_lbl}</div>'
-            f'<div style="color:#ccc;margin-top:6px;font-size:0.9rem">'
-            f'<b>Reason:</b> {hs_reason}</div>'
-            f'<div style="color:#888;margin-top:4px;font-size:0.85rem">'
-            f'Duration: <b style="color:{hs_col}">{hs_dur_s}</b></div>'
-            f'</div>',
-            unsafe_allow_html=True,
-        )
-    else:
-        st.markdown(
-            '<div style="background:#0D1B2A;border:1px solid #2A3050;'
-            'border-radius:12px;padding:16px 20px;margin-bottom:12px">'
-            '<div style="color:#43A047;font-size:1rem;font-weight:700">'
-            '✅ No hotspot detected</div>'
-            '<div style="color:#888;margin-top:6px;font-size:0.85rem">'
-            'Load distribution within normal range.</div></div>',
-            unsafe_allow_html=True,
-        )
-
-    # ═══════════════════════════════════════════════════════════════════════════
-    #  SECTION 7 — Personal Baseline Comparison
-    # ═══════════════════════════════════════════════════════════════════════════
-    st.markdown('<div class="sh">⑦ Personal Baseline Comparison</div>',
-                unsafe_allow_html=True)
-
-    load_history = st.session_state[_LOAD_HIST_KEY]
-    risk_history = st.session_state[_RISK_HIST_KEY]
-
-    if len(load_history) > 10:
-        session_baseline_load = float(np.mean(load_history[:min(40, len(load_history))]))
-        current_window_load   = float(np.mean(load_history[-min(20, len(load_history)):]))
-        load_dev_pct          = ((current_window_load - session_baseline_load)
-                                  / max(session_baseline_load, 1) * 100)
-        load_dev_col = (C["alert"]   if abs(load_dev_pct) > 30 else
-                        C["monitor"] if abs(load_dev_pct) > 15 else C["normal"])
-
-        bl1, bl2, bl3, bl4 = st.columns(4)
-        bl1.markdown(_hw_metric_card("Session Baseline Load",
-                                     f"{_adc_to_proxy(session_baseline_load):.0f}",
-                                     sub=f"{_PROXY_ABBR} · first 2 s", color="#90CAF9",
-                                     border="#2A3050", icon="📐"),
-                     unsafe_allow_html=True)
-        bl2.markdown(_hw_metric_card("Current Window Load",
-                                     f"{_adc_to_proxy(current_window_load):.0f}",
-                                     sub=f"{_PROXY_ABBR} · last {window_s:.0f} s",
-                                     color=C["accent"], border="#2A3050", icon="📊"),
-                     unsafe_allow_html=True)
-        bl3.markdown(_hw_metric_card("Deviation",
-                                     f"{load_dev_pct:+.1f}%",
-                                     sub="positive = higher than baseline",
-                                     color=load_dev_col, border="#2A3050", icon="Δ"),
-                     unsafe_allow_html=True)
-        if risk_history:
-            session_mean_risk = float(np.mean(risk_history))
-            risk_mean_level = ("ALERT" if session_mean_risk >= 60 else
-                               "MONITOR" if session_mean_risk >= 30 else "NORMAL")
-            bl4.markdown(_hw_metric_card("Session Mean Risk",
-                                         f"{session_mean_risk:.1f}/100",
-                                         sub=f"over {len(risk_history)} readings",
-                                         color=LEVEL_COLOR.get(risk_mean_level, C["normal"]),
-                                         border="#2A3050", icon="📈"),
+            v = f"{val}" if isinstance(val, int) else val
+            col.markdown(f'<div class="hwc"><h4>{name}</h4>'
+                         f'<p style="color:{color}">{v}</p></div>',
                          unsafe_allow_html=True)
 
-        if len(risk_history) > 2:
-            fig_rh = go.Figure()
-            rh_x   = list(range(len(risk_history)))
-            fig_rh.add_hrect(y0=0,  y1=30,  fillcolor="rgba(67,160,71,0.07)",  line_width=0)
-            fig_rh.add_hrect(y0=30, y1=60,  fillcolor="rgba(251,140,0,0.07)",  line_width=0)
-            fig_rh.add_hrect(y0=60, y1=100, fillcolor="rgba(229,57,53,0.07)",  line_width=0)
-            fig_rh.add_hline(y=30, line_dash="dash", line_color=C["monitor"],
-                             annotation_text="MONITOR", annotation_font_color=C["monitor"],
-                             annotation_position="right")
-            fig_rh.add_hline(y=60, line_dash="dash", line_color=C["alert"],
-                             annotation_text="ACTION", annotation_font_color=C["alert"],
-                             annotation_position="right")
-            fig_rh.add_trace(go.Scatter(
-                x=rh_x, y=risk_history, mode="lines", fill="tozeroy",
-                fillcolor="rgba(21,101,192,0.12)",
-                line=dict(color=C["accent"], width=2.2, shape="spline"),
-                hovertemplate="Reading %{x}<br>Risk: %{y:.1f}/100<extra></extra>",
-            ))
-            _chart_layout(fig_rh, height=200,
-                          title=dict(text="Risk Score — Session History",
-                                     font=dict(size=13)),
-                          margin=(40, 35, 50, 80))
-            fig_rh.update_layout(yaxis=dict(range=[0, 100], title="Risk Score"),
-                                  xaxis_title="Reading #")
-            st.plotly_chart(fig_rh, use_container_width=True)
-
-        if len(load_history) > 4:
-            lh_pkpa = [_adc_to_proxy(v) for v in load_history]
-            lh_base = _adc_to_proxy(session_baseline_load)
-            fig_lh  = go.Figure()
-            fig_lh.add_hline(y=lh_base, line_dash="dot", line_color="#43A047",
-                              annotation_text=f"Baseline {lh_base:.0f} {_PROXY_ABBR}",
-                              annotation_font_color="#43A047", annotation_position="right")
-            fig_lh.add_trace(go.Scatter(
-                y=lh_pkpa, mode="lines", fill="tozeroy",
-                fillcolor="rgba(0,176,255,0.07)",
-                line=dict(color="#1E88E5", width=1.8, shape="spline"),
-                hovertemplate="Reading %{x}<br>Load: %{y:.0f} p-kPa<extra></extra>",
-            ))
-            _chart_layout(fig_lh, height=180,
-                          title=dict(text=f"Session Load History ({_PROXY_ABBR})",
-                                     font=dict(size=12)),
-                          margin=(36, 35, 50, 80))
-            fig_lh.update_layout(yaxis_title=f"Load ({_PROXY_ABBR})",
-                                  xaxis_title="Reading #")
-            st.plotly_chart(fig_lh, use_container_width=True)
-    else:
-        st.info("Collecting session baseline — keep the insole active for a few seconds…")
-
-    # ═══════════════════════════════════════════════════════════════════════════
-    #  SECTION 8 — Explainable Risk Breakdown & Insights
-    # ═══════════════════════════════════════════════════════════════════════════
-    st.markdown('<div class="sh">⑧ Risk Breakdown &amp; Insights</div>',
-                unsafe_allow_html=True)
-
-    if rr is None:
-        st.info("Collecting data… need at least 2 packets for risk analysis.")
-    else:
-        lc = LEVEL_COLOR[rr.risk_level]
-        ri1, ri2 = st.columns([1, 2])
-        with ri1:
-            st.plotly_chart(gauge(rr.risk_score, "Risk Indicator"),
-                            use_container_width=True)
-        with ri2:
-            if not rr.contributing_factors:
-                st.markdown(
-                    '<div style="background:#162618;border:1px solid #43A047;'
-                    'border-radius:8px;padding:14px 18px;color:#81C784;font-size:0.95rem">'
-                    '✅ <b>All clear.</b> No risk factors currently triggered. '
-                    'Load, pressure, and gait are within normal ranges.</div>',
-                    unsafe_allow_html=True,
-                )
-            else:
-                st.markdown(
-                    f'<div style="color:#ccc;font-size:0.88rem;margin-bottom:8px">'
-                    f'<b style="color:{lc}">{len(rr.contributing_factors)} '
-                    f'factor{"s" if len(rr.contributing_factors) != 1 else ""} '
-                    f'contributing</b> to the risk score:</div>',
-                    unsafe_allow_html=True,
-                )
-            _risk_factor_rows(rr)
-
-        rec_icon = "💡" if rr.risk_level == "NORMAL" else (
-                   "⚠️" if rr.risk_level == "MONITOR" else "🚨")
-        st.markdown(
-            f'<div style="background:#0D1B2A;border-left:4px solid {lc};'
-            f'border-radius:6px;padding:14px 18px;color:#ddd;margin-top:14px">'
-            f'{rec_icon} <b>Recommended Action:</b><br>'
-            f'<span style="color:#ccc">{rr.recommended_action}</span></div>',
-            unsafe_allow_html=True,
-        )
-        st.markdown(
-            '<div style="background:#1A1F2E;border-left:3px solid #607D8B;'
-            'border-radius:4px;padding:8px 14px;color:#78909C;'
-            'font-size:0.78rem;margin-top:8px">'
-            '⚙ <b>Single LEFT-foot prototype:</b> Bilateral asymmetry rules '
-            'are inactive — they require two insoles. All single-foot rules '
-            '(peak load, PTI, forefoot/heel overload, gait variability, '
-            'persistence) are fully active.</div>',
-            unsafe_allow_html=True,
-        )
-
-    # ═══════════════════════════════════════════════════════════════════════════
-    #  LED / ALERT STATUS & DISCLAIMER FOOTER
-    # ═══════════════════════════════════════════════════════════════════════════
-    led_state = rr.risk_level if rr else "COLLECTING"
-    led_map   = {
-        "NORMAL":     ("🟢 LED: GREEN — Normal",           "#43A047"),
-        "MONITOR":    ("🟡 LED: AMBER — Monitor",          "#FB8C00"),
-        "ALERT":      ("🔴 LED: RED — Action Indicated",   "#E53935"),
-        "COLLECTING": ("⚪ LED: OFF — Collecting data",    "#607D8B"),
-    }
-    led_text, led_c = led_map.get(led_state, led_map["COLLECTING"])
-
-    st.markdown(
-        f'<div style="background:#0A1628;border:1px solid {led_c};'
-        f'border-radius:10px;padding:12px 20px;margin-top:16px;'
-        f'display:flex;align-items:center;gap:16px;flex-wrap:wrap">'
-        f'<span style="color:{led_c};font-size:1.1rem;font-weight:800">'
-        f'{led_text}</span>'
-        f'<span style="color:#607D8B;font-size:0.8rem;margin-left:auto">'
-        f'ESP32 on-board LED mirrors this state via firmware alert.cpp</span>'
-        f'</div>',
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        '<div class="disc" style="margin-top:12px">'
-        '⚠ EXPERIMENTAL PROTOTYPE — Not for clinical use. '
-        'FSR values are uncalibrated ADC-based proxies, not clinical kPa. '
-        'SoleSense does not diagnose any medical condition. '
-        'All thresholds are demo values only.</div>',
-        unsafe_allow_html=True,
-    )
+    # ── run health analysis and render ────────────────────────────────────────
+    report = engine.update(packets, last_received_s=status.get("last_received_s"))
+    render_health_analysis(report, C)
 
     # ── auto-refresh ──────────────────────────────────────────────────────────
-    _time.sleep(int(refresh_s))
+    import time
+    time.sleep(int(refresh_s))
     st.rerun()
-
 
 
 # ═════════════════════════════════════════════════════════════════════════════

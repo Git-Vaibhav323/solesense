@@ -1849,114 +1849,391 @@ def page_live_hardware():
         )
 
     # ═══════════════════════════════════════════════════════════════════════════
-    #  SECTION 5 — IMU / Activity
+    #  SECTION 5 — Gait Analysis (LEFT FOOT · MPU6050)
     # ═══════════════════════════════════════════════════════════════════════════
-    st.markdown('<div class="sh">⑤ Motion &amp; Activity (MPU6050)</div>',
+    st.markdown('<div class="sh">⑤ Gait Analysis — LEFT FOOT (MPU6050)</div>',
                 unsafe_allow_html=True)
 
     imu_pkts = [p for p in packets
                 if abs(p.get("ax", 0)) + abs(p.get("ay", 0)) + abs(p.get("az", 0)) > 0.001]
 
     if imu_pkts:
+        # ── raw IMU arrays ────────────────────────────────────────────────────
         ax_v = np.array([p.get("ax", 0.0) for p in imu_pkts])
         ay_v = np.array([p.get("ay", 0.0) for p in imu_pkts])
         az_v = np.array([p.get("az", 0.0) for p in imu_pkts])
         gx_v = np.array([p.get("gx", 0.0) for p in imu_pkts])
         gy_v = np.array([p.get("gy", 0.0) for p in imu_pkts])
         gz_v = np.array([p.get("gz", 0.0) for p in imu_pkts])
-        am_v = np.sqrt(ax_v**2 + ay_v**2 + az_v**2)
-        gm_v = np.sqrt(gx_v**2 + gy_v**2 + gz_v**2)
+        am_v = np.sqrt(ax_v**2 + ay_v**2 + az_v**2)   # total accel magnitude
+        gm_v = np.sqrt(gx_v**2 + gy_v**2 + gz_v**2)   # total gyro magnitude
 
-        accel_mean      = float(am_v.mean())
-        gyro_mean       = float(gm_v.mean())
+        # ── derived scalars ────────────────────────────────────────────────────
+        accel_mean     = float(am_v.mean())
+        accel_std      = float(am_v.std())
+        accel_peak     = float(am_v.max())
+        gyro_mean      = float(gm_v.mean())
+        # deviation from gravity baseline (1 g when stationary)
+        dynamic_accel  = float(np.mean(np.abs(am_v - 1.0)))
+
         cadence_est_imu = (feature_row.get("cadence_steps_per_min", 0.0)
                            if feature_row is not None else 0.0)
         stance_est_imu  = (feature_row.get("stance_time_s", 0.0)
                            if feature_row is not None else 0.0)
+        step_time_std   = (feature_row.get("step_time_std_s", 0.0)
+                           if feature_row is not None else 0.0)
 
+        # ── step count estimate from FSR load-onset events (this window) ────────
+        step_count_est = max(0, int(round(cadence_est_imu * (window_s / 60.0))))
+
+        # ── session total step counter (accumulates across all refreshes) ────────
+        _STEP_TOTAL_KEY    = "hw_total_steps"
+        _STEP_LAST_WIN_KEY = "hw_last_window_steps"
+        if _STEP_TOTAL_KEY    not in st.session_state: st.session_state[_STEP_TOTAL_KEY]    = 0
+        if _STEP_LAST_WIN_KEY not in st.session_state: st.session_state[_STEP_LAST_WIN_KEY] = 0
+        # Only add newly detected steps (avoid counting the same window twice)
+        new_steps = max(0, step_count_est - st.session_state[_STEP_LAST_WIN_KEY])
+        st.session_state[_STEP_TOTAL_KEY]    += new_steps
+        st.session_state[_STEP_LAST_WIN_KEY]  = step_count_est
+        session_total_steps = st.session_state[_STEP_TOTAL_KEY]
+
+        # ── movement intensity (0–100 normalised from dynamic accel) ──────────
+        # 0 = completely static (|A-1g|=0), 100 = very high motion (|A-1g|>1g)
+        movement_intensity = min(100.0, dynamic_accel * 100.0)
+
+        # ── gait variability (coefficient of variation of |A|) ─────────────────
+        gait_cv = (accel_std / accel_mean * 100.0) if accel_mean > 0 else 0.0
+
+        # ── activity classification ────────────────────────────────────────────
         act_label, act_icon, act_col = _activity_class(
-            abs(accel_mean - 1.0), gyro_mean, cadence_est_imu)
+            dynamic_accel, gyro_mean, cadence_est_imu)
 
-        ia1, ia2, ia3, ia4, ia5 = st.columns(5)
-        ia1.markdown(_hw_metric_card("Activity", f"{act_icon} {act_label}",
-                                     sub="classified from IMU", color=act_col,
-                                     border=act_col, icon=""),
-                     unsafe_allow_html=True)
-        ia2.markdown(_hw_metric_card("|Accel| mean", f"{accel_mean:.3f} g",
-                                     sub="MPU6050 — 3-axis magnitude", color="#42A5F5",
-                                     border="#2A3050", icon="📡"),
-                     unsafe_allow_html=True)
-        ia3.markdown(_hw_metric_card("|Gyro| mean", f"{gyro_mean:.2f} °/s",
-                                     sub="MPU6050 — angular velocity", color="#90CAF9",
-                                     border="#2A3050", icon="🔄"),
-                     unsafe_allow_html=True)
-        ia4.markdown(_hw_metric_card("Cadence (est.)", f"{cadence_est_imu:.0f} spm",
-                                     sub="from load-onset events", color="#64B5F6",
-                                     border="#2A3050", icon="🚶"),
-                     unsafe_allow_html=True)
-        ia5.markdown(_hw_metric_card("Stance (est.)", f"{stance_est_imu:.2f} s",
-                                     sub="mean weight-bearing", color="#64B5F6",
-                                     border="#2A3050", icon="⏱"),
-                     unsafe_allow_html=True)
+        # ── gait session baseline (accel magnitude history) ───────────────────
+        _GAIT_HIST_KEY = "hw_gait_accel_hist"
+        if _GAIT_HIST_KEY not in st.session_state:
+            st.session_state[_GAIT_HIST_KEY] = []
+        st.session_state[_GAIT_HIST_KEY].append(float(accel_mean))
+        if len(st.session_state[_GAIT_HIST_KEY]) > 600:
+            st.session_state[_GAIT_HIST_KEY] = st.session_state[_GAIT_HIST_KEY][-600:]
 
+        gait_hist = st.session_state[_GAIT_HIST_KEY]
+        gait_baseline_val = float(np.mean(gait_hist[:min(20, len(gait_hist))]))
+        gait_current_val  = float(np.mean(gait_hist[-min(10, len(gait_hist)):]))
+        gait_deviation    = ((gait_current_val - gait_baseline_val)
+                             / max(gait_baseline_val, 0.001) * 100.0)
+
+        # ── gait trend (STABLE / CHANGING / DEVIATING) ────────────────────────
+        if abs(gait_deviation) < 5.0:
+            gait_trend       = "STABLE"
+            gait_trend_icon  = "→"
+            gait_trend_color = "#43A047"
+        elif abs(gait_deviation) < 15.0:
+            gait_trend       = "CHANGING"
+            gait_trend_icon  = "⤴" if gait_deviation > 0 else "⤵"
+            gait_trend_color = "#FB8C00"
+        else:
+            gait_trend       = "DEVIATING"
+            gait_trend_icon  = "▲" if gait_deviation > 0 else "▼"
+            gait_trend_color = "#E53935"
+
+        # ── GAIT ANALYSIS interpretation card ─────────────────────────────────
+        if act_label in ("STANDING / STATIC", "LOW ACTIVITY"):
+            gait_card_level  = "NORMAL"
+            gait_card_color  = "#43A047"
+            gait_card_dot    = "🟢"
+            gait_card_text   = (
+                "Foot is at rest. No significant movement detected. "
+                "Place foot on the ground and walk to see gait analysis."
+            )
+        elif gait_trend == "STABLE" and gait_cv < 15.0:
+            gait_card_level  = "NORMAL"
+            gait_card_color  = "#43A047"
+            gait_card_dot    = "🟢"
+            gait_card_text   = (
+                f"Movement pattern is consistent with the current session baseline. "
+                f"Cadence is {cadence_est_imu:.0f} steps/min with stable rhythm "
+                f"(variability CV = {gait_cv:.1f}%)."
+            )
+        elif gait_trend == "CHANGING" or 15.0 <= gait_cv < 30.0:
+            gait_card_level  = "MONITOR"
+            gait_card_color  = "#FB8C00"
+            gait_card_dot    = "🟡"
+            gait_card_text   = (
+                f"Movement pattern shows a moderate deviation from the session baseline "
+                f"({gait_deviation:+.1f}%). Gait rhythm has some irregularity "
+                f"(CV = {gait_cv:.1f}%). Continue monitoring over the next few minutes."
+            )
+        else:
+            gait_card_level  = "MONITOR"
+            gait_card_color  = "#E53935"
+            gait_card_dot    = "🔴"
+            gait_card_text   = (
+                f"Movement pattern is notably different from the session baseline "
+                f"({gait_deviation:+.1f}%). High gait variability detected "
+                f"(CV = {gait_cv:.1f}%). Check for fatigue, discomfort, or altered gait."
+            )
+
+        # Reliability note for cadence
+        cadence_reliable = step_count_est >= 2 and cadence_est_imu > 0
+
+        # ══════════════════════════════════════════════════════════════════════
+        #  ROW A — GAIT ANALYSIS card + Activity + Trend
+        # ══════════════════════════════════════════════════════════════════════
+        ga_card_col, ga_meta_col = st.columns([1.6, 1])
+
+        with ga_card_col:
+            st.markdown(
+                f'<div style="background:linear-gradient(135deg,{gait_card_color}18 0%,'
+                f'#0A1628 70%);border:2px solid {gait_card_color};border-radius:14px;'
+                f'padding:18px 22px;height:100%">'
+                f'<div style="font-size:0.68rem;text-transform:uppercase;'
+                f'letter-spacing:1.8px;color:#90CAF9;margin-bottom:6px">'
+                f'GAIT ANALYSIS CARD — LEFT FOOT</div>'
+                f'<div style="font-size:1.55rem;font-weight:900;color:{gait_card_color};'
+                f'letter-spacing:1px;margin-bottom:8px">'
+                f'{gait_card_dot} {gait_card_level}</div>'
+                f'<div style="color:#D0D8F0;font-size:0.9rem;line-height:1.55">'
+                f'{gait_card_text}</div>'
+                f'<div style="margin-top:12px;display:flex;gap:12px;flex-wrap:wrap">'
+                f'<span style="background:#0D1B2A;border:1px solid {act_col};'
+                f'border-radius:20px;padding:3px 12px;color:{act_col};'
+                f'font-size:0.78rem;font-weight:700">{act_icon} {act_label}</span>'
+                f'<span style="background:#0D1B2A;border:1px solid {gait_trend_color};'
+                f'border-radius:20px;padding:3px 12px;color:{gait_trend_color};'
+                f'font-size:0.78rem;font-weight:700">'
+                f'{gait_trend_icon} Trend: {gait_trend}</span>'
+                f'</div></div>',
+                unsafe_allow_html=True,
+            )
+
+        with ga_meta_col:
+            st.markdown(
+                _hw_metric_card("Total Steps (session)",
+                                f"{session_total_steps:,}",
+                                sub=f"this window: ~{step_count_est} · load-onset detection",
+                                color="#42A5F5", border="#1565C0", icon="👣")
+                + _hw_metric_card("Cadence",
+                                  f"{cadence_est_imu:.0f} spm" if cadence_reliable else "< 2 steps",
+                                  sub="steps/min · load-onset detection",
+                                  color="#64B5F6" if cadence_reliable else "#607D8B",
+                                  border="#2A3050", icon="🚶")
+                + _hw_metric_card("Gait vs Baseline",
+                                  f"{gait_deviation:+.1f}%",
+                                  sub="current vs session start",
+                                  color=gait_trend_color, border="#2A3050", icon="📐"),
+                unsafe_allow_html=True,
+            )
+
+        st.markdown("")   # vertical spacer
+
+        # ══════════════════════════════════════════════════════════════════════
+        #  ROW B — Key gait metrics (5 cards)
+        # ══════════════════════════════════════════════════════════════════════
+        mb1, mb2, mb3, mb4, mb5 = st.columns(5)
+
+        mb1.markdown(
+            _hw_metric_card("|Accel| mean", f"{accel_mean:.3f} g",
+                            sub="total magnitude · MPU6050",
+                            color="#42A5F5", border="#1565C0", icon="📡"),
+            unsafe_allow_html=True,
+        )
+        mb2.markdown(
+            _hw_metric_card("Dynamic Accel", f"{dynamic_accel:.3f} g",
+                            sub="deviation from 1 g gravity",
+                            color="#64B5F6", border="#2A3050", icon="⚡"),
+            unsafe_allow_html=True,
+        )
+        intensity_col = (C["alert"] if movement_intensity > 60
+                         else C["monitor"] if movement_intensity > 30
+                         else C["normal"])
+        mb3.markdown(
+            _hw_metric_card("Movement Intensity", f"{movement_intensity:.0f} / 100",
+                            sub="0 = still · 100 = very active",
+                            color=intensity_col, border="#2A3050", icon="💪"),
+            unsafe_allow_html=True,
+        )
+        gait_cv_col = (C["alert"] if gait_cv > 30
+                       else C["monitor"] if gait_cv > 15
+                       else C["normal"])
+        mb4.markdown(
+            _hw_metric_card("Gait Variability CV", f"{gait_cv:.1f}%",
+                            sub="CV of |accel| · lower = steadier",
+                            color=gait_cv_col, border="#2A3050", icon="〰️"),
+            unsafe_allow_html=True,
+        )
+        mb5.markdown(
+            _hw_metric_card("Stance Time (est.)", f"{stance_est_imu:.2f} s" if stance_est_imu > 0 else "—",
+                            sub="mean weight-bearing per step",
+                            color="#90CAF9", border="#2A3050", icon="⏱"),
+            unsafe_allow_html=True,
+        )
+
+        # ══════════════════════════════════════════════════════════════════════
+        #  ROW C — Step timing card (only when reliably calculable)
+        # ══════════════════════════════════════════════════════════════════════
+        if cadence_reliable and step_time_std > 0:
+            step_time_mean_s = 60.0 / cadence_est_imu if cadence_est_imu > 0 else 0.0
+            stride_time_s    = step_time_mean_s * 2.0   # stride = 2 steps
+            st.markdown(
+                f'<div style="background:#0A1628;border:1px solid #1e2d44;'
+                f'border-radius:10px;padding:12px 18px;margin-bottom:8px;'
+                f'display:flex;gap:20px;flex-wrap:wrap;align-items:center">'
+                f'<div style="color:#90CAF9;font-size:0.68rem;text-transform:uppercase;'
+                f'letter-spacing:1.5px;white-space:nowrap">Step / Stride Timing</div>'
+                f'<div style="color:#42A5F5;font-size:0.88rem">'
+                f'Step time: <b>{step_time_mean_s:.2f} s</b></div>'
+                f'<div style="color:#64B5F6;font-size:0.88rem">'
+                f'Stride time (est.): <b>{stride_time_s:.2f} s</b></div>'
+                f'<div style="color:#90CAF9;font-size:0.88rem">'
+                f'Step-time std: <b>{step_time_std:.3f} s</b></div>'
+                f'<div style="color:{"#FB8C00" if step_time_std > 0.15 else "#43A047"};'
+                f'font-size:0.88rem">'
+                f'Variability: <b>{"HIGH ⚠" if step_time_std > 0.15 else "NORMAL ✓"}</b></div>'
+                f'<div style="color:#607D8B;font-size:0.75rem;margin-left:auto">'
+                f'Derived from FSR load-onset · single foot only</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+        # ══════════════════════════════════════════════════════════════════════
+        #  ROW D — Acceleration chart (all axes + magnitude) — EXISTING, improved
+        # ══════════════════════════════════════════════════════════════════════
         t_imu_axis = [i * frame_dur for i in range(len(imu_pkts))]
+
         fig_imu = go.Figure()
-        for vals, name, color, width in [
-            (ax_v, "AX (g)",  "#42A5F5", 1.5),
-            (ay_v, "AY (g)",  "#66BB6A", 1.5),
-            (az_v, "AZ (g)",  "#FFA726", 1.5),
-            (am_v, "|A| (g)", "#FFFFFF", 2.5),
+        # background zone for gravity reference band
+        fig_imu.add_hrect(y0=0.9, y1=1.1,
+                          fillcolor="rgba(67,160,71,0.06)", line_width=0,
+                          annotation_text="gravity band ±0.1 g",
+                          annotation_font_color="#2E7D32",
+                          annotation_font_size=9,
+                          annotation_position="top right")
+        for vals, name, color, width, dash in [
+            (ax_v, "AX — forward/back (g)",  "#42A5F5", 1.4, "solid"),
+            (ay_v, "AY — side/side (g)",     "#66BB6A", 1.4, "solid"),
+            (az_v, "AZ — up/down (g)",       "#FFA726", 1.4, "solid"),
+            (am_v, "|A| — total magnitude (g)", "#FFFFFF", 2.8, "solid"),
         ]:
             fig_imu.add_trace(go.Scatter(
                 x=t_imu_axis, y=vals.tolist(), mode="lines", name=name,
-                line=dict(color=color, width=width, shape="spline"),
-                hovertemplate=f"t=%{{x:.2f}}s<br>{name}: %{{y:.4f}}<extra></extra>",
+                line=dict(color=color, width=width, shape="spline", dash=dash),
+                hovertemplate=(
+                    "Time: %{x:.2f} s<br>"
+                    + name.split(" ")[0] + ": %{y:.4f} g<br>"
+                    "<i>(%{y:.4f} × 9.81 = " + "</i><extra></extra>"
+                ),
             ))
-        fig_imu.add_hline(y=1.0, line_dash="dot", line_color="#444",
-                          annotation_text="1 g (gravity)", annotation_font_color="#555")
-        _chart_layout(fig_imu, height=250,
-                      title=dict(text="Acceleration (g) — MPU6050  "
-                                      "<span style='font-size:11px;color:#607D8B'>"
-                                      "(1 g ≈ 9.81 m/s²)</span>",
-                                 font=dict(size=13)),
-                      margin=(44, 40, 50, 80))
+        fig_imu.add_hline(y=1.0, line_dash="dot", line_color="#2E7D32",
+                          line_width=1.5,
+                          annotation_text="1 g  (gravity when stationary)",
+                          annotation_font_color="#4CAF50",
+                          annotation_font_size=10,
+                          annotation_position="right")
+        fig_imu.add_hline(y=0.0, line_dash="dot", line_color="#37474F",
+                          line_width=1)
+        _chart_layout(fig_imu, height=270,
+                      title=dict(
+                          text="Foot Acceleration — LEFT FOOT  "
+                               "<span style='font-size:11px;color:#607D8B'>"
+                               "MPU6050 · units: g  (1 g = 9.81 m/s²) · "
+                               "stationary foot ≈ |A| = 1 g</span>",
+                          font=dict(size=13)),
+                      margin=(50, 45, 55, 90))
         fig_imu.update_layout(
-            yaxis_title="Acceleration (g)", xaxis_title="Time (s)",
-            legend=dict(orientation="h", y=-0.25, font=dict(size=11)),
+            yaxis=dict(title="Acceleration (g)", gridcolor="#1e2330",
+                       zeroline=False),
+            xaxis=dict(title="Time (s)", gridcolor="#1e2330"),
+            legend=dict(orientation="h", y=-0.28, font=dict(size=11),
+                        bgcolor="rgba(0,0,0,0)"),
         )
         st.plotly_chart(fig_imu, use_container_width=True)
 
+        # ══════════════════════════════════════════════════════════════════════
+        #  ROW E — Angular velocity chart — EXISTING, improved
+        # ══════════════════════════════════════════════════════════════════════
         fig_gyro = go.Figure()
-        for vals, name, color in [
-            (gx_v, "GX (°/s)", "#42A5F5"),
-            (gy_v, "GY (°/s)", "#66BB6A"),
-            (gz_v, "GZ (°/s)", "#FFA726"),
-            (gm_v, "|G| (°/s)","#FFFFFF"),
+        for vals, name, color, width in [
+            (gx_v, "GX — roll rate (°/s)",  "#42A5F5", 1.4),
+            (gy_v, "GY — pitch rate (°/s)", "#66BB6A", 1.4),
+            (gz_v, "GZ — yaw rate (°/s)",   "#FFA726", 1.4),
+            (gm_v, "|G| — total rate (°/s)","#FFFFFF", 2.6),
         ]:
             fig_gyro.add_trace(go.Scatter(
                 x=t_imu_axis, y=vals.tolist(), mode="lines", name=name,
-                line=dict(color=color,
-                          width=1.6 if "|" not in name else 2.2,
-                          shape="spline"),
-                hovertemplate=f"t=%{{x:.2f}}s<br>{name}: %{{y:.3f}}<extra></extra>",
+                line=dict(color=color, width=width, shape="spline"),
+                hovertemplate=(
+                    "Time: %{x:.2f} s<br>"
+                    + name.split(" ")[0] + ": %{y:.3f} °/s<extra></extra>"
+                ),
             ))
-        _chart_layout(fig_gyro, height=220,
-                      title=dict(text="Angular Velocity (°/s) — MPU6050",
-                                 font=dict(size=13)),
-                      margin=(40, 40, 50, 80))
+        fig_gyro.add_hline(y=0.0, line_dash="dot", line_color="#37474F",
+                           line_width=1)
+        _chart_layout(fig_gyro, height=240,
+                      title=dict(
+                          text="Foot Rotation Rate — LEFT FOOT  "
+                               "<span style='font-size:11px;color:#607D8B'>"
+                               "MPU6050 · units: °/s · "
+                               "zero = no rotation</span>",
+                          font=dict(size=13)),
+                      margin=(50, 45, 55, 90))
         fig_gyro.update_layout(
-            yaxis_title="Angular velocity (°/s)", xaxis_title="Time (s)",
-            legend=dict(orientation="h", y=-0.28, font=dict(size=11)),
+            yaxis=dict(title="Angular velocity (°/s)", gridcolor="#1e2330",
+                       zeroline=False),
+            xaxis=dict(title="Time (s)", gridcolor="#1e2330"),
+            legend=dict(orientation="h", y=-0.28, font=dict(size=11),
+                        bgcolor="rgba(0,0,0,0)"),
         )
         st.plotly_chart(fig_gyro, use_container_width=True)
+
+        # ══════════════════════════════════════════════════════════════════════
+        #  ROW F — Movement intensity sparkline (new — vs session baseline)
+        # ══════════════════════════════════════════════════════════════════════
+        if len(gait_hist) > 4:
+            gh_x = list(range(len(gait_hist)))
+            fig_gh = go.Figure()
+            fig_gh.add_hrect(y0=0.95, y1=1.05,
+                             fillcolor="rgba(67,160,71,0.07)", line_width=0)
+            fig_gh.add_hline(
+                y=gait_baseline_val, line_dash="dot", line_color="#43A047",
+                line_width=1.5,
+                annotation_text=f"Baseline {gait_baseline_val:.3f} g",
+                annotation_font_color="#4CAF50",
+                annotation_font_size=10,
+                annotation_position="right",
+            )
+            fig_gh.add_trace(go.Scatter(
+                x=gh_x, y=gait_hist,
+                mode="lines", fill="tozeroy",
+                fillcolor="rgba(66,165,245,0.08)",
+                line=dict(color="#42A5F5", width=2.0, shape="spline"),
+                hovertemplate="Reading %{x}<br>|Accel| mean: %{y:.4f} g<extra></extra>",
+                name="|Accel| mean",
+            ))
+            _chart_layout(fig_gh, height=190,
+                          title=dict(
+                              text="Movement Intensity — Session History  "
+                                   "<span style='font-size:11px;color:#607D8B'>"
+                                   "mean |A| per window · baseline = session start</span>",
+                              font=dict(size=12)),
+                          margin=(44, 38, 55, 90))
+            fig_gh.update_layout(
+                yaxis=dict(title="|Accel| mean (g)", gridcolor="#1e2330"),
+                xaxis=dict(title="Window #", gridcolor="#1e2330"),
+                showlegend=False,
+            )
+            st.plotly_chart(fig_gh, use_container_width=True)
 
     else:
         st.markdown(
             '<div style="background:#1A1F2E;border:1px solid #2A3050;'
-            'border-radius:10px;padding:18px;color:#607D8B">'
-            '📡 MPU6050 IMU not reporting — check wiring and firmware config.</div>',
+            'border-radius:10px;padding:20px;color:#607D8B;font-size:0.9rem">'
+            '📡 <b>MPU6050 IMU not reporting data.</b><br>'
+            '<span style="font-size:0.82rem">Check wiring (SDA→GPIO8, SCL→GPIO9) '
+            'and firmware config. I²C address: 0x68 (AD0→GND).</span>'
+            '</div>',
             unsafe_allow_html=True,
         )
+
 
     # ═══════════════════════════════════════════════════════════════════════════
     #  SECTION 6 — Regional Hotspot
